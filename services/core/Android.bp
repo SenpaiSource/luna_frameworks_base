@@ -256,6 +256,7 @@ java_library_static {
         "AvfBuildFlags",
         "vendor.aospa.biometrics.face",
         "vendor.lunaris.duckrkp-V1-java",
+        "vendor.aac.hardware.richtap.vibrator-V1-java",
     ],
     javac_shard_size: 50,
     javacflags: [

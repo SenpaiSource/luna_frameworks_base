@@ -26,6 +26,7 @@ import android.os.IVibratorStateListener;
 import android.os.Parcel;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
+import android.os.RichTapVibrationEffect;
 import android.os.Trace;
 import android.os.VibrationEffect;
 import android.os.VibratorInfo;
@@ -63,6 +64,9 @@ final class VibratorController implements HalVibrator {
     private volatile State mCurrentState;
     private volatile float mCurrentAmplitude;
 
+    @Nullable
+    private RichTapVibratorService mRichTapService;
+
     VibratorController(int vibratorId) {
         this(vibratorId, new NativeWrapper());
     }
@@ -85,6 +89,11 @@ final class VibratorController implements HalVibrator {
             mVibratorInfo = vibratorInfoBuilder.build();
             if (!mVibratorInfoLoadSuccessful) {
                 Slog.e(TAG, "Init failed to load some HAL info for vibrator " + vibratorId);
+            }
+
+            // Initialize RichTap service if supported by this device.
+            if (RichTapVibrationEffect.isSupported()) {
+                mRichTapService = new RichTapVibratorService();
             }
 
             // Reset the hardware to a default state.
@@ -219,7 +228,11 @@ final class VibratorController implements HalVibrator {
         try {
             boolean success = false;
             synchronized (mLock) {
-                if (mVibratorInfo.hasCapability(IVibrator.CAP_AMPLITUDE_CONTROL)) {
+                if (mRichTapService != null) {
+                    int strength = (int) (255.0f * amplitude);
+                    mRichTapService.richTapVibratorSetAmplitude(strength);
+                    success = true;
+                } else if (mVibratorInfo.hasCapability(IVibrator.CAP_AMPLITUDE_CONTROL)) {
                     mNativeWrapper.setAmplitude(amplitude);
                     success = true;
                 }
@@ -238,7 +251,13 @@ final class VibratorController implements HalVibrator {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onMillis");
         try {
             synchronized (mLock) {
-                long duration = mNativeWrapper.on(milliseconds, vibrationId, stepId);
+                long duration = 0;
+                if (mRichTapService != null) {
+                    duration = milliseconds;
+                    mRichTapService.richTapVibratorOn(duration);
+                } else {
+                    duration = mNativeWrapper.on(milliseconds, vibrationId, stepId);
+                }
                 if (duration > 0) {
                     updateStateAndNotifyListenersLocked(State.VIBRATING);
                 }
@@ -276,8 +295,22 @@ final class VibratorController implements HalVibrator {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onPrebaked");
         try {
             synchronized (mLock) {
-                long duration = mNativeWrapper.perform(prebaked.getEffectId(),
-                        prebaked.getEffectStrength(), vibrationId, stepId);
+                long duration = 0;
+                if (mRichTapService != null) {
+                    int[] pattern = RichTapVibrationEffect.getInnerEffect(prebaked.getEffectId());
+                    int strength = RichTapVibrationEffect.getInnerEffectStrength(
+                            prebaked.getEffectStrength());
+                    if (pattern != null) {
+                        duration = 30;
+                        mRichTapService.richTapVibratorOnRawPattern(pattern, strength, 0);
+                    } else {
+                        duration = mNativeWrapper.perform(prebaked.getEffectId(),
+                                prebaked.getEffectStrength(), vibrationId, stepId);
+                    }
+                } else {
+                    duration = mNativeWrapper.perform(prebaked.getEffectId(),
+                            prebaked.getEffectStrength(), vibrationId, stepId);
+                }
                 if (duration > 0) {
                     updateStateAndNotifyListenersLocked(State.VIBRATING);
                 }
