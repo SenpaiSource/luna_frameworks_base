@@ -71,6 +71,7 @@ final class PerformPrebakedVibratorStep extends AbstractComposedVibratorStep {
             if (!Flags.removeHidlSupport()) {
                 VibrationEffect fallback = getVibration().getFallback(prebaked.getEffectId());
                 if (vibratorOnResult == 0 && prebaked.shouldFallback()
+                        && !vibrator.usesRichTap()
                         && (fallback instanceof VibrationEffect.Composed)) {
                     if (VibrationThread.DEBUG) {
                         Slog.d(VibrationThread.TAG, "Playing fallback for effect "
