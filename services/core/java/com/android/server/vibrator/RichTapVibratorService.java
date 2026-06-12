@@ -33,7 +33,9 @@ public class RichTapVibratorService {
     private static final String TAG = RichTapVibratorService.class.getSimpleName();
     private static final String VIBRATOR_DESCRIPTOR = IVibrator.DESCRIPTOR + "/default";
     private static final boolean DEBUG = false;
+    private static final int RICHTAP_LOOPER_ONCE = 1;
 
+    @NonNull
     private final IRichtapCallback mCallback;
     private volatile IRichtapVibrator sRichtapVibratorService = null;
 
@@ -64,6 +66,11 @@ public class RichTapVibratorService {
                     sRichtapVibratorService = IRichtapVibrator.Stub.asInterface(
                             Binder.allowBlocking(binder));
                     binder.linkToDeath(new VibHalDeathRecipient(this), 0);
+                    try {
+                        sRichtapVibratorService.init(mCallback);
+                    } catch (Exception e) {
+                        Slog.w(TAG, "Failed to init RichTap service with callback", e);
+                    }
                 } else {
                     Slog.e(TAG, "Extension binder is null");
                 }
@@ -79,7 +86,22 @@ public class RichTapVibratorService {
     }
 
     public RichTapVibratorService(@Nullable IRichtapCallback callback) {
-        mCallback = callback;
+        mCallback = callback != null ? callback : new IRichtapCallback.Stub() {
+            @Override
+            public void onCallback(int status) {
+                if (DEBUG) Slog.d(TAG, "onCallback status=" + status);
+            }
+
+            @Override
+            public int getInterfaceVersion() {
+                return IRichtapCallback.VERSION;
+            }
+
+            @Override
+            public String getInterfaceHash() {
+                return IRichtapCallback.HASH;
+            }
+        };
     }
 
     public void richTapVibratorOn(long millis) {
@@ -110,9 +132,11 @@ public class RichTapVibratorService {
         try {
             IRichtapVibrator service = getRichtapService();
             if (service != null) {
-                if (DEBUG) Slog.d(TAG, "Executing raw pattern with amplitude: " +
-                        amplitude + ", freq: " + freq);
-                service.performHe(1, 0, amplitude, freq, pattern, mCallback);
+                if (DEBUG) {
+                    Slog.d(TAG, "Executing raw pattern with amplitude: " +
+                            amplitude + ", freq: " + freq);
+                }
+                service.performHe(RICHTAP_LOOPER_ONCE, 0, amplitude, freq, pattern, mCallback);
             }
         } catch (Exception e) {
             Slog.e(TAG, "Failed to execute raw pattern", e);
