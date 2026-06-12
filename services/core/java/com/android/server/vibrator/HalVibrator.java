@@ -83,6 +83,10 @@ interface HalVibrator {
      */
     float getCurrentAmplitude();
 
+    default boolean usesRichTap() {
+        return false;
+    }
+
     /**
      * Set the vibrator control to be external or not, based on given flag.
      *
