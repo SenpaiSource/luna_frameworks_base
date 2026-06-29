@@ -324,6 +324,44 @@ static BufferItemConsumer* ImageReader_getBufferConsumer(JNIEnv* env, jobject th
     return ctx->getBufferConsumer();
 }
 
+#ifdef __ANDROID__
+// OnePlus camera (APS) extension. Mirrors stock libandroid_runtime's
+// ImageReader.nativeGetConsumer: returns the IGraphicBufferConsumer that backs this
+// ImageReader's BufferItemConsumer as a raw native pointer (jlong). The OnePlus camera
+// SDK (ApsUtils.getConsumerPtr) reflects this method and hands the pointer to the native
+// APS addPreviewFrameBuff path to attach a zero-copy preview consumer. Without it the SDK
+// throws NoSuchMethodException, loses the APS zero-copy consumer attach and falls back to
+// per-frame buffer handling, producing a preview buffer-return backlog. The returned
+// IGraphicBufferConsumer stays alive via ConsumerBase::mConsumer (the BufferItemConsumer
+// holds a strong reference for its lifetime), matching stock semantics.
+// Gated on __ANDROID__ because the host-build libgui stub (libs/hostgraphics/) does not
+// expose getIGraphicBufferConsumer(); this method is only meaningful on-device anyway.
+static jlong ImageReader_getConsumer(JNIEnv* env, jobject thiz)
+{
+    ALOGV("%s:", __FUNCTION__);
+    JNIImageReaderContext* const ctx = ImageReader_getContext(env, thiz);
+    if (ctx == NULL) {
+        jniThrowRuntimeException(env, "ImageReaderContext is not initialized");
+        return 0;
+    }
+
+    BufferItemConsumer* bufferConsumer = ctx->getBufferConsumer();
+    if (bufferConsumer == NULL) {
+        jniThrowRuntimeException(env, "Buffer consumer is uninitialized");
+        return 0;
+    }
+
+    // getIGraphicBufferConsumer() is marked deprecated upstream as a refactoring signal,
+    // but it is the only public API path to the IGraphicBufferConsumer from outside the
+    // ConsumerBase class hierarchy. This is an intentional OEM compatibility bridge; the
+    // deprecation warning is suppressed here rather than being propagated as a build error.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    return reinterpret_cast<jlong>(bufferConsumer->getIGraphicBufferConsumer().get());
+#pragma GCC diagnostic pop
+}
+#endif // __ANDROID__
+
 static void Image_setBufferItem(JNIEnv* env, jobject thiz,
         const BufferItem* buffer)
 {
@@ -1038,6 +1076,7 @@ static const JNINativeMethod gImageReaderMethods[] =
          {"nativeGetSurface", "()Landroid/view/Surface;", (void*)ImageReader_getSurface},
          {"nativeDetachImage", "(Landroid/media/Image;Z)I", (void*)ImageReader_detachImage},
 #ifdef __ANDROID__
+         {"nativeGetConsumer", "()J", (void*)ImageReader_getConsumer},
          {"nativeCreateImagePlanes",
           "(ILandroid/graphics/GraphicBuffer;IIIIII)[Landroid/media/ImageReader$ImagePlane;",
           (void*)ImageReader_createImagePlanes},

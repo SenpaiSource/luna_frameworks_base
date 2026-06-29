@@ -1468,6 +1468,12 @@ public class ImageReader implements AutoCloseable {
     private synchronized native void nativeReleaseImage(Image i);
     private synchronized native Surface nativeGetSurface();
     private synchronized native int nativeDetachImage(Image i, boolean throwISEOnly);
+    // OnePlus camera (APS) extension: returns the native IGraphicBufferConsumer pointer that
+    // backs this ImageReader. The OnePlus camera SDK (ApsUtils.getConsumerPtr) calls this
+    // reflectively to attach a zero-copy preview consumer in the native APS path; without it
+    // the SDK throws NoSuchMethodException, loses the APS zero-copy consumer attach and falls
+    // back to per-frame buffer handling.
+    private synchronized native long nativeGetConsumer();
     private synchronized native void nativeDiscardFreeBuffers();
 
     /**
