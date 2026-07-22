@@ -112,6 +112,40 @@ static jlong android_hardware_HardwareBuffer_getNativeFinalizer(JNIEnv* env, job
     return static_cast<jlong>(reinterpret_cast<uintptr_t>(&destroyWrapper));
 }
 
+// OnePlus camera (APS) extension. ImageReader$SurfaceImage#nativeGetOplusHardwareBuffer hands a
+// HardwareBuffer a native object that is a heap-allocated sp<GraphicBuffer> holder (built with
+// `new sp<GraphicBuffer>(...)`), NOT a GraphicBufferWrapper/AHardwareBuffer. The generic
+// destroyWrapper() finalizer would `delete` it as the wrong type, so the holder gets its own
+// finalizer that deletes the sp<GraphicBuffer>, releasing the strong GraphicBuffer reference.
+static void freeOplusGraphicBufferHolder(void* holder) {
+    delete reinterpret_cast<sp<GraphicBuffer>*>(holder);
+}
+
+static jlong android_hardware_HardwareBuffer_getOplusHolderFinalizer(JNIEnv* env, jobject clazz) {
+    return static_cast<jlong>(reinterpret_cast<uintptr_t>(&freeOplusGraphicBufferHolder));
+}
+
+// Size estimate (for NativeAllocationRegistry GC accounting) of an sp<GraphicBuffer> holder.
+// Mirrors estimateSize() but reads the holder type rather than a GraphicBufferWrapper, so the
+// pointer is never reinterpreted as the wrong layout.
+static jlong android_hardware_HardwareBuffer_estimateOplusHolderSize(JNIEnv* env, jobject clazz,
+        jlong nativeObject) {
+    sp<GraphicBuffer>* holder = reinterpret_cast<sp<GraphicBuffer>*>(nativeObject);
+    if (holder == nullptr || *holder == nullptr) {
+        return 0;
+    }
+    GraphicBuffer* buffer = holder->get();
+    uint32_t bpp = bytesPerPixel(buffer->getPixelFormat());
+    if (bpp == 0) {
+        // If the pixel format is not recognized, use 1 as default.
+        bpp = 1;
+    }
+
+    const uint32_t bufferStride =
+            buffer->getStride() > 0 ? buffer->getStride() : buffer->getWidth();
+    return static_cast<jlong>(static_cast<uint64_t>(buffer->getHeight() * bufferStride * bpp));
+}
+
 static jboolean android_hardware_HardwareBuffer_isSupported(JNIEnv* env, jobject clazz,
         jint width, jint height, jint format, jint layers, jlong usage) {
 
@@ -275,6 +309,10 @@ static const JNINativeMethod gMethods[] = {
             (void*) android_hardware_HardwareBuffer_createFromGraphicBuffer },
     { "nGetNativeFinalizer", "()J",
             (void*) android_hardware_HardwareBuffer_getNativeFinalizer },
+    { "nGetOplusHolderFinalizer", "()J",
+            (void*) android_hardware_HardwareBuffer_getOplusHolderFinalizer },
+    { "nEstimateOplusHolderSize", "(J)J",
+            (void*) android_hardware_HardwareBuffer_estimateOplusHolderSize },
     { "nWriteHardwareBufferToParcel",  "(JLandroid/os/Parcel;)V",
             (void*) android_hardware_HardwareBuffer_write },
     { "nReadHardwareBufferFromParcel", "(Landroid/os/Parcel;)J",
