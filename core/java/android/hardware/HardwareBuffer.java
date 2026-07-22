@@ -401,15 +401,40 @@ public final class HardwareBuffer implements Parcelable, AutoCloseable {
     }
 
     /**
+     * @hide
+     * Builds the NativeAllocationRegistry for an {@code sp<GraphicBuffer>} holder (the native
+     * object handed in by ImageReader$SurfaceImage#nativeGetOplusHardwareBuffer). Unlike
+     * {@link #getRegistry(long)} it uses {@link #nGetOplusHolderFinalizer()}, which deletes the
+     * holder as an {@code sp<GraphicBuffer>*} instead of as a {@code GraphicBufferWrapper*}.
+     */
+    private static NativeAllocationRegistry getOplusHolderRegistry(long size) {
+        final long func = nGetOplusHolderFinalizer();
+        final Class cls = HardwareBuffer.class;
+        return com.android.libcore.readonly.Flags.nativeMetrics()
+            ? NativeAllocationRegistry.createNonmalloced(cls, func, size)
+            : NativeAllocationRegistry.createNonmalloced(cls.getClassLoader(), func, size);
+    }
+
+    /**
      * Private use only. Called from JNI (ImageReader$SurfaceImage#nativeGetOplusHardwareBuffer)
      * with a native object that is an {@code sp<GraphicBuffer>} holder rather than an
-     * {@code AHardwareBuffer}. Mirrors the stock OnePlus framework's {@code (JZ)V} constructor:
-     * it intentionally skips nEstimateSize()/registerNativeAllocation(), which assume an
-     * AHardwareBuffer; the native holder's lifetime is managed by the OnePlus camera (APS) side.
-     * The boolean argument only selects this overload.
+     * {@code AHardwareBuffer}. The boolean argument only selects this overload.
+     *
+     * <p>The holder is a heap-allocated {@code new sp<GraphicBuffer>(...)} that nothing on the
+     * native side ever deletes, so it must be cleaned up from here. We register a
+     * NativeAllocationRegistry cleaner using a holder-specific finalizer
+     * ({@link #nGetOplusHolderFinalizer()}) that deletes the {@code sp<GraphicBuffer>}, releasing
+     * the strong GraphicBuffer reference on {@link #close()} and on GC/{@link #finalize()}.
+     * Without this cleaner every frame the OnePlus camera (APS) pulls via
+     * getOplusHardwareBuffer() leaks one GC-immune {@code sp<GraphicBuffer>}. The holder type is
+     * incompatible with the generic {@link #nGetNativeFinalizer()} (GraphicBufferWrapper), so it
+     * must not be reused here. Size is estimated from the holder's GraphicBuffer for GC
+     * accounting, mirroring the {@link #HardwareBuffer(long)} ctor.
      */
     private HardwareBuffer(long nativeObject, boolean isGraphicBufferHolder) {
         mNativeObject = nativeObject;
+        long holderSize = nEstimateOplusHolderSize(nativeObject);
+        mCleaner = getOplusHolderRegistry(holderSize).registerNativeAllocation(this, mNativeObject);
         mCloseGuard.open("HardwareBuffer.close");
     }
 
@@ -501,9 +526,9 @@ public final class HardwareBuffer implements Parcelable, AutoCloseable {
         if (!isClosed()) {
             mCloseGuard.close();
             mNativeObject = 0;
-            // mCleaner is null for buffers created via the HardwareBuffer(long, boolean)
-            // ctor (OnePlus sp<GraphicBuffer> holder); their native lifetime is owned by
-            // the caller, so there is nothing to free here.
+            // mCleaner runs the native finalizer registered in the constructor: it frees the
+            // GraphicBufferWrapper for normal HardwareBuffers, or deletes the sp<GraphicBuffer>
+            // holder for OnePlus APS buffers created via the HardwareBuffer(long, boolean) ctor.
             if (mCleaner != null) {
                 mCleaner.run();
                 mCleaner = null;
@@ -570,6 +595,9 @@ public final class HardwareBuffer implements Parcelable, AutoCloseable {
             long usage);
     private static native long nCreateFromGraphicBuffer(GraphicBuffer graphicBuffer);
     private static native long nGetNativeFinalizer();
+    // OnePlus APS (sp<GraphicBuffer> holder) support; see HardwareBuffer(long, boolean).
+    private static native long nGetOplusHolderFinalizer();
+    private static native long nEstimateOplusHolderSize(long nativeObject);
     private static native void nWriteHardwareBufferToParcel(long nativeObject, Parcel dest);
     private static native long nReadHardwareBufferFromParcel(Parcel in);
     @FastNative
