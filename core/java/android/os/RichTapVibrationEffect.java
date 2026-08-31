@@ -67,6 +67,49 @@ public final class RichTapVibrationEffect {
     }
 
     /**
+     * Gets an approximate playback duration (in milliseconds) for the given effect id's inner
+     * pattern.
+     *
+     * <p>RichTap's {@code IRichtapVibrator} HAL is fire-and-forget: it does not report back a
+     * duration, and {@link #getInnerEffect} does not encode an explicit total duration either
+     * (each "transient" event only carries a relative start time, not a length). These values
+     * are therefore conservative estimates, cross-checked against this device's own
+     * {@code /vendor/etc/richtapresources} {@code .he} definitions where possible (e.g.
+     * {@code double_click.he} plays its second transient 70ms after the first).
+     *
+     * <p>This must never return 0 or a negative value for an id that {@link #getInnerEffect}
+     * can resolve: callers use this to report the vibration's "on" duration to the platform,
+     * and a non-positive duration is interpreted as "unsupported/failed", which cancels the
+     * whole vibration instead of just this segment.
+     *
+     * @param id The vibration effect ID
+     * @return Approximate duration in milliseconds, always positive.
+     */
+    public static long getInnerEffectDuration(int id) {
+        switch (id) {
+            case VibrationEffect.EFFECT_CLICK:
+            case VibrationEffect.EFFECT_POP:
+                return 40L;
+            case VibrationEffect.EFFECT_DOUBLE_CLICK:
+                // Second transient starts 70ms after the first (see double_click.he) plus one
+                // transient's own ring-down tail.
+                return 110L;
+            case VibrationEffect.EFFECT_TICK:
+                return 25L;
+            case VibrationEffect.EFFECT_THUD:
+                return 60L;
+            case VibrationEffect.EFFECT_HEAVY_CLICK:
+                return 50L;
+            case VibrationEffect.EFFECT_TEXTURE_TICK:
+                return 45L;
+            default:
+                // Unknown id: still return a small positive placeholder so callers that already
+                // confirmed getInnerEffect(id) != null do not accidentally cancel the vibration.
+                return 30L;
+        }
+    }
+
+    /**
      * Gets the inner effect strength value for a given strength level.
      * @param strength The desired effect strength
      * @return Strength value, or 0 if invalid

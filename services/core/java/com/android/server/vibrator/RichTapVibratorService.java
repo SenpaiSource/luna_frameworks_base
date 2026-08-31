@@ -116,6 +116,44 @@ public class RichTapVibratorService {
         }
     }
 
+    /**
+     * Turns the RichTap vibrator off, interrupting any in-progress {@code on}/{@code performHe}
+     * pattern. This must be called from {@link HalVibrator#off()} - otherwise a RichTap-driven
+     * vibration cannot be cancelled early and will always run to completion.
+     *
+     * <p>Calls both {@code stop()} and {@code off()} on the vendor extension: the upstream AIDL
+     * doc comment for {@code IRichtapVibrator#off} literally says "do nothing", while
+     * {@code stop} is documented as the "interface for short latency" - i.e. the one actually
+     * meant to interrupt in-flight playback. Both are {@code oneway} (fire-and-forget), so
+     * calling both costs one extra async binder transaction, not a blocking round trip.
+     */
+    public void richTapVibratorOff() {
+        try {
+            IRichtapVibrator service = getRichtapService();
+            if (service != null) {
+                if (DEBUG) Slog.d(TAG, "Executing vibratorOff");
+                service.stop(mCallback);
+                service.off(mCallback);
+            }
+        } catch (Exception e) {
+            Slog.e(TAG, "Failed to execute vibratorOff", e);
+        }
+    }
+
+    /**
+     * Returns {@code true} if the RichTap vendor extension is currently reachable.
+     *
+     * <p>This can return {@code false} even when the device is configured to use RichTap (e.g.
+     * {@code config_usesRichtapVibration} is {@code true}) if the vendor extension binder is not
+     * yet available (for example, early in boot) or has died and not yet reconnected. Callers
+     * should treat a {@code false} result as "fall back to the standard vibrator HAL for this
+     * call" rather than a permanent failure, since this is re-checked (and retried) on every
+     * call.
+     */
+    public boolean isAvailable() {
+        return getRichtapService() != null;
+    }
+
     public void richTapVibratorSetAmplitude(int amplitude) {
         try {
             IRichtapVibrator service = getRichtapService();
