@@ -56,6 +56,7 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 
 import com.android.internal.graphics.ColorUtils;
+import com.android.systemui.statusbar.VibratorHelper;
 import com.android.systemui.common.shared.colors.SurfaceEffectColors;
 import com.android.systemui.common.ui.drawable.CosTileBorderDrawable;
 import com.android.systemui.qs.flags.MistQsMode;
@@ -105,7 +106,9 @@ public class FooterView extends StackScrollerDecorView {
     private OnClickListener mClearAllButtonClickListener;
 
     private static final VibrationEffect EFFECT_CLICK =
-            VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK);
+            VibrationEffect.startComposition()
+                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 1.0f)
+                    .compose();
 
     private final Vibrator mVibrator;
 
@@ -434,7 +437,7 @@ public class FooterView extends StackScrollerDecorView {
 
     private OnClickListener withHaptics(OnClickListener listener) {
         return v -> {
-            mVibrator.vibrate(EFFECT_CLICK);
+            mVibrator.vibrate(EFFECT_CLICK, VibratorHelper.TOUCH_VIBRATION_ATTRIBUTES);
             if (listener != null) listener.onClick(v);
         };
     }

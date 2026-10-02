@@ -42,6 +42,7 @@ import android.os.HandlerExecutor;
 import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
+import android.os.UserHandle;
 import android.os.VibrationEffect;
 import android.provider.Settings;
 import android.service.notification.Condition;
@@ -574,11 +575,37 @@ public class VolumeDialogControllerImpl implements VolumeDialogController, Dumpa
         if (showSilentHint) {
             mCallbacks.onShowSilentHint();
         }
+        if (fromKey && isVolumeHapticsEnabled()) {
+            vibrateVolumeKey();
+        }
         if (changed && fromKey) {
             Events.writeEvent(Events.EVENT_KEY, stream, lastAudibleStreamVolume);
             mCallbacks.onVolumeChangedFromKey();
         }
         return changed;
+    }
+
+    private void vibrateVolumeKey() {
+        if (mHasVibrator) {
+            mVibrator.vibrate(
+                    VibrationEffect.get(VibrationEffect.EFFECT_TICK),
+                    VibratorHelper.HARDWARE_FEEDBACK_VIBRATION_ATTRIBUTES);
+        }
+    }
+
+    private boolean isVolumeHapticsEnabled() {
+        int userId = mUserTracker.getUserId();
+        boolean hapticEnabled = Settings.System.getIntForUser(
+                mContext.getContentResolver(),
+                Settings.System.HAPTIC_FEEDBACK_ENABLED,
+                1,
+                userId) != 0;
+        boolean volumeDialogHaptic = Settings.Secure.getIntForUser(
+                mContext.getContentResolver(),
+                Settings.Secure.VOLUME_DIALOG_HAPTIC_FEEDBACK,
+                1,
+                userId) != 0;
+        return hapticEnabled && volumeDialogHaptic;
     }
 
     private boolean updateActiveStreamW(int activeStream) {
