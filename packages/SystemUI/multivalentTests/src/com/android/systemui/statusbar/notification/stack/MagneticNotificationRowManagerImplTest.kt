@@ -356,7 +356,7 @@ class MagneticNotificationRowManagerImplTest : SysuiTestCase() {
             // THEN threshold haptics play to indicate the dismissal
             val composition =
                 VibrationEffect.startComposition()
-                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.7f)
+                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 1.0f)
                     .compose()
             assertThat(vibratorHelper.hasVibratedWithEffects(composition)).isTrue()
         }

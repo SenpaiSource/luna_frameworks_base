@@ -52,8 +52,11 @@ public class VibratorHelper {
             VibrationEffect.get(VibrationEffect.EFFECT_CLICK);
     private static final VibrationEffect BIOMETRIC_ERROR_VIBRATION_EFFECT =
             VibrationEffect.get(VibrationEffect.EFFECT_DOUBLE_CLICK);
-    private static final VibrationAttributes HARDWARE_FEEDBACK_VIBRATION_ATTRIBUTES =
-            VibrationAttributes.createForUsage(VibrationAttributes.USAGE_HARDWARE_FEEDBACK);
+    public static final VibrationAttributes HARDWARE_FEEDBACK_VIBRATION_ATTRIBUTES =
+            new VibrationAttributes.Builder()
+                    .setUsage(VibrationAttributes.USAGE_HARDWARE_FEEDBACK)
+                    .setFlags(VibrationAttributes.FLAG_BYPASS_INTERRUPTION_POLICY)
+                    .build();
     private static final VibrationAttributes COMMUNICATION_REQUEST_VIBRATION_ATTRIBUTES =
             VibrationAttributes.createForUsage(VibrationAttributes.USAGE_COMMUNICATION_REQUEST);
 
