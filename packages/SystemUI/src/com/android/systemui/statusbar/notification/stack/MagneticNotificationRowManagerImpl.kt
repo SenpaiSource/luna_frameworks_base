@@ -295,9 +295,9 @@ constructor(
         } else {
             val composition =
                 VibrationEffect.startComposition()
-                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.7f)
+                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 1.0f)
                     .compose()
-            vibratorHelper.vibrate(composition)
+            vibratorHelper.vibrate(composition, VibratorHelper.TOUCH_VIBRATION_ATTRIBUTES)
         }
     }
 

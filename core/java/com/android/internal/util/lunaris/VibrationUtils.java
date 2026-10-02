@@ -17,7 +17,8 @@
 package com.android.internal.util.lunaris;
 
 import android.content.Context;
-import android.os.AsyncTask;
+import android.os.SystemClock;
+import android.os.VibrationAttributes;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 
@@ -26,9 +27,20 @@ import java.util.concurrent.Executors;
 
 public class VibrationUtils {
 
-    private static Executor executor = Executors.newSingleThreadExecutor();
+    private static final VibrationAttributes TOUCH_VIBRATION_ATTRIBUTES =
+            VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH);
+    private static final Executor executor = Executors.newSingleThreadExecutor();
+    private static final long DEBOUNCE_MS = 250;
+    private static long sLastVibrateTime = 0;
 
     public static void triggerVibration(final Context context, final int intensity) {
+        long now = SystemClock.uptimeMillis();
+        synchronized (VibrationUtils.class) {
+            if (now - sLastVibrateTime < DEBOUNCE_MS) {
+                return;
+            }
+            sLastVibrateTime = now;
+        }
         executor.execute(new Runnable() {
             @Override
             public void run() {
@@ -40,8 +52,7 @@ public class VibrationUtils {
                 if (effect == null) {
                     return;
                 }
-                vibrator.cancel();
-                vibrator.vibrate(effect);
+                vibrator.vibrate(effect, TOUCH_VIBRATION_ATTRIBUTES);
             }
         });
     }
@@ -49,7 +60,7 @@ public class VibrationUtils {
     private static VibrationEffect createVibrationEffect(int intensity) {
         switch (intensity) {
             case 1:
-                return VibrationEffect.createPredefined(VibrationEffect.EFFECT_TEXTURE_TICK);
+                return VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK);
             case 2:
                 return VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK);
             case 3:

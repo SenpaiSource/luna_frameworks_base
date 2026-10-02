@@ -228,10 +228,20 @@ public final class HapticFeedbackVibrationProvider {
         switch (effectId) {
             case HapticFeedbackConstants.CONTEXT_CLICK:
             case HapticFeedbackConstants.GESTURE_END:
-            case HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE:
-            case HapticFeedbackConstants.SCROLL_TICK:
             case HapticFeedbackConstants.SEGMENT_TICK:
                 return VibrationEffect.get(VibrationEffect.EFFECT_TICK);
+
+            case HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE:
+                return getVibration(
+                        VibrationEffect.Composition.PRIMITIVE_TICK,
+                        /* primitiveScale= */ 0.65f,
+                        VibrationEffect.EFFECT_TICK);
+
+            case HapticFeedbackConstants.SCROLL_TICK:
+                return getVibration(
+                        VibrationEffect.Composition.PRIMITIVE_TICK,
+                        /* primitiveScale= */ 0.4f,
+                        VibrationEffect.EFFECT_TICK);
 
             case HapticFeedbackConstants.TEXT_HANDLE_MOVE:
             case HapticFeedbackConstants.CLOCK_TICK:

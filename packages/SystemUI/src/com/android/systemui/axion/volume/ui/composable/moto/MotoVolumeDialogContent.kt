@@ -123,14 +123,7 @@ fun MotoVolumeDialogContent(
         }
     }
     val slideOffset = with(LocalDensity.current) { MotoPanelWidth.toPx() }
-    val view = LocalView.current
     val interactionOwner = remember(viewModel) { Any() }
-    val hapticsEnabled by viewModel.isHapticEnabled.collectAsStateWithLifecycle()
-    LaunchedEffect(viewModel, hapticsEnabled) {
-        viewModel.volumeKeyHapticTrigger.collect {
-            if (hapticsEnabled) view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-        }
-    }
 
     Box(
         modifier = Modifier.pointerInput(viewModel, interactionOwner) {

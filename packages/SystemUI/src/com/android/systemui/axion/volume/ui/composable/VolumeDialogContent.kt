@@ -86,16 +86,6 @@ fun AxionVolumeDialogContent(
         label = "overscroll"
     )
 
-    val isHapticEnabled by viewModel.isHapticEnabled.collectAsStateWithLifecycle()
-    val view = LocalView.current
-    LaunchedEffect(Unit) {
-        viewModel.volumeKeyHapticTrigger.collect {
-            if (isHapticEnabled) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
-        }
-    }
-
     val slideOffset = with(LocalDensity.current) { 48.dp.toPx() }
 
     var showCollapsed by remember { mutableStateOf(!isExpanded) }
