@@ -574,11 +574,38 @@ public class VolumeDialogControllerImpl implements VolumeDialogController, Dumpa
         if (showSilentHint) {
             mCallbacks.onShowSilentHint();
         }
-        if (changed && fromKey) {
-            Events.writeEvent(Events.EVENT_KEY, stream, lastAudibleStreamVolume);
+        if (fromKey) {
+            if (isVolumeHapticsEnabled()) {
+                vibrateVolumeKey();
+            }
+            if (changed) {
+                Events.writeEvent(Events.EVENT_KEY, stream, lastAudibleStreamVolume);
+            }
             mCallbacks.onVolumeChangedFromKey();
         }
         return changed;
+    }
+
+    private void vibrateVolumeKey() {
+        if (mVibrator != null && mVibrator.hasVibrator()) {
+            mVibrator.vibrate(
+                    VibrationEffect.get(VibrationEffect.EFFECT_CLICK),
+                    VibratorHelper.HARDWARE_FEEDBACK_VIBRATION_ATTRIBUTES);
+        }
+    }
+
+    private boolean isVolumeHapticsEnabled() {
+        boolean hapticEnabled = Settings.System.getIntForUser(
+                mContext.getContentResolver(),
+                Settings.System.HAPTIC_FEEDBACK_ENABLED,
+                1,
+                android.os.UserHandle.USER_CURRENT) != 0;
+        boolean volumeDialogHaptic = Settings.Secure.getIntForUser(
+                mContext.getContentResolver(),
+                Settings.Secure.VOLUME_DIALOG_HAPTIC_FEEDBACK,
+                1,
+                android.os.UserHandle.USER_CURRENT) != 0;
+        return hapticEnabled && volumeDialogHaptic;
     }
 
     private boolean updateActiveStreamW(int activeStream) {

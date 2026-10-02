@@ -43,13 +43,12 @@ import androidx.compose.ui.platform.*
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import android.view.HapticFeedbackConstants
 import com.android.systemui.axion.volume.domain.model.AxionAppVolumeModel
 import com.android.systemui.axion.volume.domain.model.AxionVolumeStreamModel
 import com.android.systemui.axion.volume.domain.model.VolumeSliderItem
 import com.android.systemui.axion.volume.ui.viewmodel.AxionVolumeDialogViewModel
-import com.android.systemui.haptics.slider.SeekableSliderTrackerConfig
-import com.android.systemui.haptics.slider.SliderHapticFeedbackConfig
-import com.android.systemui.lifecycle.rememberViewModel
+import kotlin.math.floor
 
 @Composable
 fun SliderColumn(
@@ -150,23 +149,14 @@ fun VolumeSlider(
     var isDragging by remember { mutableStateOf(false) }
     var isPressed by remember { mutableStateOf(false) }
     val isHapticEnabled by viewModel.isHapticEnabled.collectAsState()
+    val view = LocalView.current
+    val hapticStepFraction = 1f / 15f
+    var lastHapticStep by remember { mutableFloatStateOf(floor(value / hapticStepFraction)) }
     
     LaunchedEffect(value) {
         if (!isDragging) {
             sliderValue = value
-        }
-    }
-    
-    val interactionSource = remember { MutableInteractionSource() }
-    val hapticsViewModel = key(viewModel) {
-        rememberViewModel(traceName = "VolumeSliderHaptics") {
-            viewModel.sliderHapticsViewModelFactory.create(
-                interactionSource,
-                0f..1f,
-                Orientation.Vertical,
-                SliderHapticFeedbackConfig(),
-                SeekableSliderTrackerConfig()
-            )
+            lastHapticStep = floor(value / hapticStepFraction)
         }
     }
 
@@ -247,6 +237,13 @@ fun VolumeSlider(
                             onTap = {
                                 viewModel.isInteracting = true
                                 sliderValue = 1f - (it.y / size.height).coerceIn(0f, 1f)
+                                val newStep = floor(sliderValue / hapticStepFraction)
+                                if (newStep != lastHapticStep) {
+                                    lastHapticStep = newStep
+                                    if (isHapticEnabled) {
+                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                    }
+                                }
                                 onValueChange(sliderValue)
                                 viewModel.isInteracting = false
                             }
@@ -258,19 +255,23 @@ fun VolumeSlider(
                                 isDragging = true
                                 streamType?.let { viewModel.setActiveStream(it) }
                                 sliderValue = 1f - (it.y / size.height).coerceIn(0f, 1f)
+                                val newStep = floor(sliderValue / hapticStepFraction)
+                                if (newStep != lastHapticStep) {
+                                    lastHapticStep = newStep
+                                    if (isHapticEnabled) {
+                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                    }
+                                }
                                 onValueChange(sliderValue)
-                                if (isHapticEnabled) hapticsViewModel.onValueChange(sliderValue)
                                 viewModel.isInteracting = true
                             },
                             onDragEnd = { 
                                 isDragging = false
-                                if (isHapticEnabled) hapticsViewModel.onValueChangeEnded()
                                 viewModel.isInteracting = false
                                 viewModel.setOverscrollOffset(0f)
                             },
                             onDragCancel = { 
                                 isDragging = false
-                                if (isHapticEnabled) hapticsViewModel.onValueChangeEnded()
                                 viewModel.isInteracting = false
                                 viewModel.setOverscrollOffset(0f)
                             },
@@ -294,9 +295,12 @@ fun VolumeSlider(
                                         viewModel.setOverscrollOffset(0f)
                                     }
                                 }
-                                if (isHapticEnabled) {
-                                    hapticsViewModel.addVelocityDataPoint(sliderValue)
-                                    hapticsViewModel.onValueChange(sliderValue)
+                                val newStep = floor(sliderValue / hapticStepFraction)
+                                if (newStep != lastHapticStep) {
+                                    lastHapticStep = newStep
+                                    if (isHapticEnabled) {
+                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                    }
                                 }
                                 onValueChange(sliderValue)
                             }

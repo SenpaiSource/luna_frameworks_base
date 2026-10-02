@@ -18,7 +18,6 @@ package com.android.systemui.axion.volume.ui.composable.lunaris
 
 import android.content.res.Configuration
 import android.media.AudioManager
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -75,16 +74,6 @@ fun LunarisVolumeDialogContent(viewModel: AxionVolumeDialogViewModel) {
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
         label = "lunaris_overscroll"
     )
-
-    val isHapticEnabled by viewModel.isHapticEnabled.collectAsStateWithLifecycle()
-    val view = LocalView.current
-    LaunchedEffect(Unit) {
-        viewModel.volumeKeyHapticTrigger.collect {
-            if (isHapticEnabled) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
-        }
-    }
 
     val slideOffset = with(LocalDensity.current) { 56.dp.toPx() }
     val slideDirection = if (isLeft) -1 else 1

@@ -28,6 +28,7 @@ import com.android.systemui.haptics.slider.compose.ui.SliderHapticsViewModel
 import java.lang.ref.WeakReference
 import javax.inject.Inject
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
 
 enum class VisibilityState {
@@ -72,7 +73,11 @@ class AxionVolumeDialogViewModel @Inject constructor(
     private val interactionOwners = mutableSetOf<Any>()
     private val _showingAppVolumes = MutableStateFlow(false)
     private val _overscrollOffset = MutableStateFlow(0f)
-    private val _volumeKeyHapticTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val _volumeKeyHapticTrigger = MutableSharedFlow<Unit>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     private val _rescheduleTimeoutTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     val uiState: StateFlow<AxionVolumeDialogUiState> = combine(
@@ -156,6 +161,7 @@ class AxionVolumeDialogViewModel @Inject constructor(
         isInteracting = false
         expansionState = ExpansionState.COLLAPSED
         _showingAppVolumes.value = false
+        _volumeKeyHapticTrigger.resetReplayCache()
     }
     
     fun triggerVolumeKeyHaptic() {

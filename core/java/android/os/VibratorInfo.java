@@ -1192,6 +1192,13 @@ public class VibratorInfo implements Parcelable {
             return this;
         }
 
+        /** Remove a supported primitive from the configured primitives. */
+        @NonNull
+        public Builder removeSupportedPrimitive(int primitiveId) {
+            mSupportedPrimitives.delete(primitiveId);
+            return this;
+        }
+
         /** Configure maximum delay, in milliseconds, supported in a composed effect primitive. */
         @NonNull
         public Builder setPrimitiveDelayMax(int primitiveDelayMax) {

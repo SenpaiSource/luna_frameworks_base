@@ -52,8 +52,8 @@ final class VibrationScaler {
 
     // TODO(b/345186129): remove this once we finish migrating to scale factor and clean up flags.
     // Scale factors for each level.
-    private static final float SCALE_FACTOR_VERY_LOW = 0.6f;
-    private static final float SCALE_FACTOR_LOW = 0.8f;
+    private static final float SCALE_FACTOR_VERY_LOW = 0.80f;
+    private static final float SCALE_FACTOR_LOW = 0.92f;
     private static final float SCALE_FACTOR_HIGH = 1.2f;
     private static final float SCALE_FACTOR_VERY_HIGH = 1.4f;
 
@@ -318,6 +318,11 @@ final class VibrationScaler {
                                         + " default level gain of %.2f",
                                 scaleFactor, scaleLevelToString(level), scaleLevelGain));
                 scaleFactor = SCALE_FACTOR_NONE;
+            }
+            if (level == SCALE_LOW) {
+                scaleFactor = Math.max(0.92f, scaleFactor);
+            } else if (level == SCALE_VERY_LOW) {
+                scaleFactor = Math.max(0.80f, scaleFactor);
             }
             return scaleFactor;
         }

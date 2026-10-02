@@ -499,7 +499,7 @@ public class NavigationBar extends ViewController<NavigationBarView> implements 
         if (onHomeLongClick(mView.getHomeButton().getCurrentView())) {
             if (mHomeButtonLongPressHapticEnabled) {
                 mView.getHomeButton().getCurrentView().performHapticFeedback(
-                        HapticFeedbackConstants.LONG_PRESS,
+                        HapticFeedbackConstants.ASSISTANT_BUTTON,
                         HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING);
             }
         }

@@ -56,16 +56,20 @@ class VintfHalVibratorManager {
             Slog.v(TAG, "Loading default IVibratorManager service.");
             VintfSupplier<IVibratorManager> managerSupplier = new DefaultVibratorManagerSupplier();
             IntFunction<HalVibrator> vibratorFactory =
-                    vibratorId -> new DefaultHalVibrator(vibratorId,
-                            new ManagedVibratorSupplier(vibratorId, managerSupplier), handler,
-                            nativeHandler);
+                    vibratorId -> RichTapHalVibrator.wrapIfNeeded(
+                            new DefaultHalVibrator(vibratorId,
+                                    new ManagedVibratorSupplier(vibratorId, managerSupplier),
+                                    handler, nativeHandler),
+                            handler);
             return new DefaultHalVibratorManager(managerSupplier, nativeHandler, vibratorFactory);
         }
         if (ServiceManager.isDeclared(IVibrator.DESCRIPTOR + "/default")) {
             Slog.v(TAG, "Loading default IVibrator service.");
             return new LegacyHalVibratorManager(
-                    new DefaultHalVibrator(DEFAULT_VIBRATOR_ID, new DefaultVibratorSupplier(),
-                            handler, nativeHandler),
+                    RichTapHalVibrator.wrapIfNeeded(
+                            new DefaultHalVibrator(DEFAULT_VIBRATOR_ID,
+                                    new DefaultVibratorSupplier(), handler, nativeHandler),
+                            handler),
                     nativeHandler);
         }
         Slog.v(TAG, "No default services declared for IVibratorManager or IVibrator."
