@@ -76,16 +76,6 @@ fun LunarisVolumeDialogContent(viewModel: AxionVolumeDialogViewModel) {
         label = "lunaris_overscroll"
     )
 
-    val isHapticEnabled by viewModel.isHapticEnabled.collectAsStateWithLifecycle()
-    val view = LocalView.current
-    LaunchedEffect(Unit) {
-        viewModel.volumeKeyHapticTrigger.collect {
-            if (isHapticEnabled) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
-        }
-    }
-
     val slideOffset = with(LocalDensity.current) { 56.dp.toPx() }
     val slideDirection = if (isLeft) -1 else 1
 

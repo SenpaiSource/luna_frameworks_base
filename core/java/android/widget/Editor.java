@@ -249,6 +249,19 @@ public class Editor {
     private boolean mSelectionControllerEnabled;
 
     private final boolean mHapticTextHandleEnabled;
+    private long mLastTextHandleHapticTime = 0;
+    private static final long TEXT_HANDLE_HAPTIC_MIN_INTERVAL_MS = 30;
+
+    private void performTextHandleHapticFeedback() {
+        if (!mHapticTextHandleEnabled) {
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (now - mLastTextHandleHapticTime >= TEXT_HANDLE_HAPTIC_MIN_INTERVAL_MS) {
+            mLastTextHandleHapticTime = now;
+            mTextView.performHapticFeedback(HapticFeedbackConstants.TEXT_HANDLE_MOVE);
+        }
+    }
     /** Handles OnBackInvokedCallback back dispatch */
     private final OnBackInvokedCallback mBackCallback = this::stopTextActionMode;
     private boolean mBackCallbackRegistered;
@@ -5367,8 +5380,8 @@ public class Editor {
             if (offsetChanged || forceUpdatePosition) {
                 if (offsetChanged) {
                     updateSelection(offset);
-                    if (fromTouchScreen && mHapticTextHandleEnabled) {
-                        mTextView.performHapticFeedback(HapticFeedbackConstants.TEXT_HANDLE_MOVE);
+                    if (fromTouchScreen) {
+                        performTextHandleHapticFeedback();
                     }
                     addPositionToTouchUpFilter(offset);
                 }
@@ -6706,9 +6719,7 @@ public class Editor {
             }
             Selection.setSelection((Spannable) mTextView.getText(), offset);
             updateCursorPosition();
-            if (mHapticTextHandleEnabled) {
-                mTextView.performHapticFeedback(HapticFeedbackConstants.TEXT_HANDLE_MOVE);
-            }
+            performTextHandleHapticFeedback();
         }
 
         /**
@@ -7221,12 +7232,11 @@ public class Editor {
 
         private void updateSelectionInternal(int selectionStart, int selectionEnd,
                 boolean fromTouchScreen) {
-            final boolean performHapticFeedback = fromTouchScreen && mHapticTextHandleEnabled
-                    && ((mTextView.getSelectionStart() != selectionStart)
-                            || (mTextView.getSelectionEnd() != selectionEnd));
+            final boolean selectionChanged = (mTextView.getSelectionStart() != selectionStart)
+                    || (mTextView.getSelectionEnd() != selectionEnd);
             Selection.setSelection((Spannable) mTextView.getText(), selectionStart, selectionEnd);
-            if (performHapticFeedback) {
-                mTextView.performHapticFeedback(HapticFeedbackConstants.TEXT_HANDLE_MOVE);
+            if (fromTouchScreen && selectionChanged) {
+                performTextHandleHapticFeedback();
             }
         }
 
