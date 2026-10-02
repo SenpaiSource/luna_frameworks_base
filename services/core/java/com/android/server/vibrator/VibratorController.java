@@ -22,6 +22,8 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.hardware.vibrator.IVibrator;
 import android.os.Binder;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IVibratorStateListener;
 import android.os.Parcel;
 import android.os.RemoteCallbackList;
@@ -52,13 +54,9 @@ final class VibratorController implements HalVibrator {
     @GuardedBy("mLock")
     private final NativeWrapper mNativeWrapper;
 
-    // Vibrator state listeners that support concurrent updates and broadcasts, but should lock
-    // while broadcasting to guarantee delivery order.
     private final RemoteCallbackList<IVibratorStateListener> mVibratorStateListeners =
             new RemoteCallbackList<>();
 
-    // Vibrator state variables that are updated from synchronized blocks but can be read anytime
-    // for a snippet of the current known vibrator state/info.
     private volatile VibratorInfo mVibratorInfo;
     private volatile boolean mVibratorInfoLoadSuccessful;
     private volatile State mCurrentState;
@@ -66,6 +64,21 @@ final class VibratorController implements HalVibrator {
 
     @Nullable
     private RichTapVibratorService mRichTapService;
+
+    // RichTap completion scheduling.
+    private Handler mRichTapHandler;
+    @GuardedBy("mLock")
+    private Object mDispatchToken;
+    @GuardedBy("mLock")
+    private boolean mRichTapVibrating;
+    @GuardedBy("mLock")
+    private long mRichTapDuration;
+    @GuardedBy("mLock")
+    private float mRichTapAmplitude = 1.0f;
+    // Timestamp of the last tick-class primitive dispatch, used to preempt a tick when
+    // a click-class prebaked effect follows within a short window.
+    private volatile long mLastTickDispatchTime = -1;
+    private volatile Callbacks mCallbacks;
 
     VibratorController(int vibratorId) {
         this(vibratorId, new NativeWrapper());
@@ -81,29 +94,23 @@ final class VibratorController implements HalVibrator {
     public void init(@NonNull Callbacks callbacks) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.init");
         try {
+            mCallbacks = callbacks;
             int vibratorId = mVibratorInfo.getId();
             mNativeWrapper.init(vibratorId, callbacks);
-            // Try to load VibratorInfo early.
             VibratorInfo.Builder vibratorInfoBuilder = new VibratorInfo.Builder(vibratorId);
             mVibratorInfoLoadSuccessful = mNativeWrapper.getInfo(vibratorInfoBuilder);
-            // Initialize RichTap service if supported by this device.
             if (RichTapVibrationEffect.isSupported()) {
                 mRichTapService = new RichTapVibratorService();
-                long caps = vibratorInfoBuilder.build().getCapabilities() | IVibrator.CAP_COMPOSE_EFFECTS | IVibrator.CAP_AMPLITUDE_CONTROL;
-                vibratorInfoBuilder.setCapabilities(caps);
-                vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 10);
-                vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD, 10);
-                vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_SPIN, 10);
-                vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, 10);
-                vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_LOW_TICK, 10);
+                HandlerThread ht = new HandlerThread("RichTapHandler");
+                ht.start();
+                mRichTapHandler = new Handler(ht.getLooper());
+
+                refreshRichTapInfo(vibratorInfoBuilder);
             }
             mVibratorInfo = vibratorInfoBuilder.build();
             if (!mVibratorInfoLoadSuccessful) {
                 Slog.e(TAG, "Init failed to load some HAL info for vibrator " + vibratorId);
             }
-
-            // Reset the hardware to a default state.
-            // In case this is a runtime restart instead of a fresh boot.
             setExternalControl(false);
             off();
         } finally {
@@ -115,30 +122,28 @@ final class VibratorController implements HalVibrator {
     public void onSystemReady() {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onSystemReady");
         try {
-            // Early check outside lock, for quick return.
-            if (mVibratorInfoLoadSuccessful) {
-                return;
+            if (!mVibratorInfoLoadSuccessful) {
+                synchronized (mLock) {
+                    if (!mVibratorInfoLoadSuccessful) {
+                        int vibratorId = mVibratorInfo.getId();
+                        VibratorInfo.Builder vibratorInfoBuilder =
+                                new VibratorInfo.Builder(vibratorId);
+                        mVibratorInfoLoadSuccessful = mNativeWrapper.getInfo(vibratorInfoBuilder);
+                        if (RichTapVibrationEffect.isSupported()) {
+                            refreshRichTapInfo(vibratorInfoBuilder);
+                        }
+                        mVibratorInfo = vibratorInfoBuilder.build();
+                        if (!mVibratorInfoLoadSuccessful) {
+                            Slog.e(TAG, "Failed retry of HAL getInfo for vibrator " + vibratorId);
+                        }
+                    }
+                }
             }
-            synchronized (mLock) {
-                if (mVibratorInfoLoadSuccessful) {
-                    return;
-                }
-                int vibratorId = mVibratorInfo.getId();
-                VibratorInfo.Builder vibratorInfoBuilder = new VibratorInfo.Builder(vibratorId);
-                mVibratorInfoLoadSuccessful = mNativeWrapper.getInfo(vibratorInfoBuilder);
-                if (RichTapVibrationEffect.isSupported()) {
-                    long caps = vibratorInfoBuilder.build().getCapabilities() | IVibrator.CAP_COMPOSE_EFFECTS | IVibrator.CAP_AMPLITUDE_CONTROL;
-                    vibratorInfoBuilder.setCapabilities(caps);
-                    vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 10);
-                    vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD, 10);
-                    vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_SPIN, 10);
-                    vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, 10);
-                    vibratorInfoBuilder.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_LOW_TICK, 10);
-                }
-                mVibratorInfo = vibratorInfoBuilder.build();
-                if (!mVibratorInfoLoadSuccessful) {
-                    Slog.e(TAG, "Failed retry of HAL getInfo for vibrator " + vibratorId);
-                }
+
+            // Connect to the RichTap HAL on a background thread.
+            if (mRichTapService != null && !mRichTapService.isAvailable()) {
+                final RichTapVibratorService richTap = mRichTapService;
+                new Thread(() -> richTap.init(), "RichTapInit").start();
             }
         } finally {
             Trace.traceEnd(TRACE_TAG_VIBRATOR);
@@ -248,17 +253,16 @@ final class VibratorController implements HalVibrator {
         try {
             boolean success = false;
             synchronized (mLock) {
-                if (mRichTapService != null) {
+                if (mRichTapService != null && mRichTapService.isAvailable()) {
                     int strength = (int) (255.0f * amplitude);
                     mRichTapService.richTapVibratorSetAmplitude(strength);
+                    mRichTapAmplitude = amplitude;
                     success = true;
                 } else if (mVibratorInfo.hasCapability(IVibrator.CAP_AMPLITUDE_CONTROL)) {
                     mNativeWrapper.setAmplitude(amplitude);
                     success = true;
                 }
-                if (mCurrentState == State.VIBRATING) {
-                    mCurrentAmplitude = amplitude;
-                }
+                mCurrentAmplitude = amplitude;
             }
             return success;
         } finally {
@@ -270,14 +274,29 @@ final class VibratorController implements HalVibrator {
     public long on(long vibrationId, long stepId, long milliseconds) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onMillis");
         try {
-            synchronized (mLock) {
-                long duration = 0;
-                if (mRichTapService != null) {
-                    duration = milliseconds;
-                    mRichTapService.richTapVibratorOn(duration);
-                } else {
-                    duration = mNativeWrapper.on(milliseconds, vibrationId, stepId);
+            if (mRichTapService != null) {
+                if (mRichTapService.isAvailable()) {
+                    Object token = newDispatchToken();
+                    int strength = (int) (255 * mRichTapAmplitude);
+                    if (strength > 0 && strength < 200) {
+                        strength = 200;
+                    }
+                    mRichTapService.richTapVibratorSetAmplitude(strength);
+                    mRichTapService.richTapVibratorOn(milliseconds);
+                    synchronized (mLock) {
+                        mDispatchToken = token;
+                        setRichTapVibratingLocked(true, mRichTapAmplitude, milliseconds);
+                    }
+                    scheduleCompletion(token, vibrationId, stepId, milliseconds);
+                    return milliseconds;
                 }
+                // HAL died — trigger reconnect for next call.
+                final RichTapVibratorService richTap = mRichTapService;
+                mRichTapHandler.post(() -> richTap.init());
+                return 0;
+            }
+            synchronized (mLock) {
+                long duration = mNativeWrapper.on(milliseconds, vibrationId, stepId);
                 if (duration > 0) {
                     updateStateAndNotifyListenersLocked(State.VIBRATING);
                 }
@@ -314,16 +333,46 @@ final class VibratorController implements HalVibrator {
     public long on(long vibrationId, long stepId, PrebakedSegment prebaked) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onPrebaked");
         try {
-            synchronized (mLock) {
-                if (mRichTapService != null) {
-                    int[] pattern = RichTapVibrationEffect.getInnerEffect(prebaked.getEffectId());
-                    if (pattern != null) {
-                        int strength = RichTapVibrationEffect.getInnerEffectStrength(
-                                prebaked.getEffectStrength());
-                        mRichTapService.richTapVibratorOnRawPattern(pattern, strength, 0);
+            if (mRichTapService != null) {
+                long duration = RichTapVibrationEffect.getInnerEffectDuration(
+                        prebaked.getEffectId());
+                if (duration > 0 && mRichTapService.isAvailable()) {
+                    Object token = newDispatchToken();
+                    int strength = RichTapVibrationEffect.getInnerEffectStrength(
+                            prebaked.getEffectStrength());
+                    if (strength <= 0) {
+                        strength = 255;
                     }
-                    return 0;
+                    if (strength < 200) {
+                        strength = 200;
+                    }
+                    int prebakedId = prebaked.getEffectId();
+                    // Track when a tick-class effect plays so click preemption can stop it.
+                    // This covers the fallback path where HapticFeedbackVibrationProvider
+                    // emits EFFECT_TICK instead of PRIMITIVE_TICK (stale VibratorInfo).
+                    if (prebakedId == VibrationEffect.EFFECT_TICK) {
+                        mLastTickDispatchTime = android.os.SystemClock.elapsedRealtime();
+                    }
+                    // If a tick just played and this is a click-class effect, stop the tick
+                    // before it completes so only the click is felt (prevents double vibration).
+                    if ((prebakedId == VibrationEffect.EFFECT_CLICK
+                            || prebakedId == VibrationEffect.EFFECT_HEAVY_CLICK)
+                            && android.os.SystemClock.elapsedRealtime()
+                                    - mLastTickDispatchTime < 80) {
+                        mRichTapService.richTapVibratorOff();
+                    }
+                    mRichTapService.richTapVibratorSetAmplitude(strength);
+                    mRichTapService.richTapVibratorOn(duration);
+                    synchronized (mLock) {
+                        mDispatchToken = token;
+                        setRichTapVibratingLocked(true, (float) strength / 255f, duration);
+                    }
+                    scheduleCompletion(token, vibrationId, stepId, duration);
+                    return duration;
                 }
+                return 0;
+            }
+            synchronized (mLock) {
                 long duration = mNativeWrapper.perform(prebaked.getEffectId(),
                         prebaked.getEffectStrength(), vibrationId, stepId);
                 if (duration > 0) {
@@ -340,31 +389,13 @@ final class VibratorController implements HalVibrator {
     public long on(long vibrationId, long stepId, PrimitiveSegment[] primitives) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onPrimitives");
         try {
-            if (mRichTapService != null && primitives != null && primitives.length > 0) {
-                synchronized (mLock) {
-                    int primitiveId = primitives[0].getPrimitiveId();
-                    float scale = primitives[0].getScale();
-                    int mappedEffectId;
-                    
-                    if (primitiveId == VibrationEffect.Composition.PRIMITIVE_CLICK) {
-                        mappedEffectId = VibrationEffect.EFFECT_CLICK;
-                    } else if (primitiveId == VibrationEffect.Composition.PRIMITIVE_THUD) {
-                        mappedEffectId = VibrationEffect.EFFECT_THUD;
-                    } else {
-                        mappedEffectId = VibrationEffect.EFFECT_TICK;
-                    }
-                    int[] pattern = RichTapVibrationEffect.getInnerEffect(mappedEffectId);
-                    if (pattern != null) {
-                        int baseStrength = RichTapVibrationEffect.getInnerEffectStrength(VibrationEffect.EFFECT_STRENGTH_LIGHT);
-                        int strength = (int) (baseStrength * scale);
-                        if (strength > 10) {
-                            mRichTapService.richTapVibratorOnRawPattern(pattern, strength, 0);
-                        }
-                    }
-                    return 0;
+            if (mRichTapService != null) {
+                if (mRichTapService.isAvailable()
+                        && primitives != null && primitives.length > 0) {
+                    return dispatchRichTapPrimitives(vibrationId, stepId, primitives);
                 }
+                return 0;
             }
-
             if (!mVibratorInfo.hasCapability(IVibrator.CAP_COMPOSE_EFFECTS)) {
                 return 0;
             }
@@ -378,6 +409,215 @@ final class VibratorController implements HalVibrator {
         } finally {
             Trace.traceEnd(TRACE_TAG_VIBRATOR);
         }
+    }
+
+    private long dispatchRichTapPrimitives(long vibrationId, long stepId,
+            PrimitiveSegment[] primitives) {
+        Object token = newDispatchToken();
+        long totalDuration = 0;
+        boolean anyDispatched = false;
+
+        // If all primitives are LOW_TICK (gesture bar touch rumble), drop them completely
+        // so touching the gesture bar remains completely silent.
+        boolean hasNonLowTick = false;
+        for (PrimitiveSegment p : primitives) {
+            if (p.getPrimitiveId() != VibrationEffect.Composition.PRIMITIVE_LOW_TICK) {
+                hasNonLowTick = true;
+                break;
+            }
+        }
+        if (!hasNonLowTick) {
+            scheduleCompletion(token, vibrationId, stepId, 1L);
+            return 1L;
+        }
+
+        if (primitives.length == 1) {
+            PrimitiveSegment prim = primitives[0];
+            int primId = prim.getPrimitiveId();
+            if (primId == VibrationEffect.Composition.PRIMITIVE_LOW_TICK) {
+                // Too subtle for RichTap overhead; signal 1ms completion.
+                scheduleCompletion(token, vibrationId, stepId, 1L);
+                return 1L;
+            }
+            int mappedId = mapPrimitiveToEffectId(primId);
+            float scale = prim.getScale();
+            float boostedScale = (float) Math.pow(scale, 0.35);
+            int strength = Math.max(200, (int) (255 * boostedScale));
+            if (strength >= 10) {
+                long effectDuration = getPrimitivePlayDuration(primId);
+                long reportedDuration = effectDuration;
+                if (mappedId == VibrationEffect.EFFECT_TICK) {
+                    mLastTickDispatchTime = android.os.SystemClock.elapsedRealtime();
+                    reportedDuration = 12;
+                }
+                scheduleDispatch(token, null, strength, 0, effectDuration);
+                totalDuration = reportedDuration;
+                anyDispatched = true;
+            }
+        } else if (primitives.length == 2
+                && primitives[0].getDelay() == 0
+                && primitives[0].getPrimitiveId() == VibrationEffect.Composition.PRIMITIVE_QUICK_RISE
+                && primitives[1].getPrimitiveId() == VibrationEffect.Composition.PRIMITIVE_TICK) {
+            // ASSISTANT_BUTTON: HEAVY_CLICK at full strength for a premium deep thump.
+            long effectDuration = RichTapVibrationEffect.getInnerEffectDuration(
+                    VibrationEffect.EFFECT_HEAVY_CLICK);
+            scheduleDispatch(token, null, 255, 0, effectDuration);
+            totalDuration = effectDuration;
+            anyDispatched = true;
+        } else {
+            // To prevent terrible double-buzzes when the framework sends composed effects
+            // (like [TICK, CLICK] for buttons), we ONLY dispatch the final non-LOW_TICK primitive
+            // in the composition, matching VOS.
+            PrimitiveSegment primitive = null;
+            for (int i = primitives.length - 1; i >= 0; i--) {
+                if (primitives[i].getPrimitiveId() != VibrationEffect.Composition.PRIMITIVE_LOW_TICK) {
+                    primitive = primitives[i];
+                    break;
+                }
+            }
+            if (primitive == null) {
+                scheduleCompletion(token, vibrationId, stepId, 1L);
+                return 1L;
+            }
+            int mappedEffectId = mapPrimitiveToEffectId(primitive.getPrimitiveId());
+            long effectDuration = RichTapVibrationEffect.getInnerEffectDuration(mappedEffectId);
+            float scale = primitive.getScale();
+            float boostedScale = (float) Math.pow(scale, 0.35);
+            int strength = Math.max(200, (int) (255 * boostedScale));
+            if (strength > 25) {
+                long reportedDuration = effectDuration;
+                if (mappedEffectId == VibrationEffect.EFFECT_TICK) {
+                    reportedDuration = 12;
+                }
+                scheduleDispatch(token, null, strength, 0, effectDuration);
+                totalDuration = reportedDuration;
+                anyDispatched = true;
+            }
+        }
+
+        if (!anyDispatched) {
+            scheduleCompletion(token, vibrationId, stepId, 1L);
+            return 1L;
+        }
+        synchronized (mLock) {
+            mDispatchToken = token;
+            setRichTapVibratingLocked(true, 1f, totalDuration);
+        }
+        scheduleCompletion(token, vibrationId, stepId, totalDuration);
+        return totalDuration;
+    }
+
+    private static int mapPrimitiveToEffectId(int primitiveId) {
+        switch (primitiveId) {
+            case VibrationEffect.Composition.PRIMITIVE_CLICK:
+                return VibrationEffect.EFFECT_CLICK;
+            case VibrationEffect.Composition.PRIMITIVE_THUD:
+                return VibrationEffect.EFFECT_THUD;
+            case VibrationEffect.Composition.PRIMITIVE_SPIN:
+                return VibrationEffect.EFFECT_POP;
+            case VibrationEffect.Composition.PRIMITIVE_QUICK_FALL:
+                return VibrationEffect.EFFECT_HEAVY_CLICK;
+            case VibrationEffect.Composition.PRIMITIVE_SLOW_RISE:
+            case VibrationEffect.Composition.PRIMITIVE_QUICK_RISE:
+            case VibrationEffect.Composition.PRIMITIVE_TICK:
+            default:
+                return VibrationEffect.EFFECT_TICK;
+        }
+    }
+
+    private static long getPrimitivePlayDuration(int primitiveId) {
+        switch (primitiveId) {
+            case VibrationEffect.Composition.PRIMITIVE_CLICK:
+                return RichTapVibrationEffect.getInnerEffectDuration(VibrationEffect.EFFECT_CLICK);
+            case VibrationEffect.Composition.PRIMITIVE_THUD:
+                return RichTapVibrationEffect.getInnerEffectDuration(VibrationEffect.EFFECT_THUD);
+            case VibrationEffect.Composition.PRIMITIVE_SPIN:
+                return RichTapVibrationEffect.getInnerEffectDuration(VibrationEffect.EFFECT_POP);
+            case VibrationEffect.Composition.PRIMITIVE_QUICK_FALL:
+                return RichTapVibrationEffect.getInnerEffectDuration(
+                        VibrationEffect.EFFECT_HEAVY_CLICK);
+            case VibrationEffect.Composition.PRIMITIVE_QUICK_RISE:
+                return 50L;
+            case VibrationEffect.Composition.PRIMITIVE_SLOW_RISE:
+                return 150L;
+            case VibrationEffect.Composition.PRIMITIVE_TICK:
+            default:
+                return RichTapVibrationEffect.getInnerEffectDuration(VibrationEffect.EFFECT_TICK);
+        }
+    }
+
+    private static Object newDispatchToken() {
+        return new Object();
+    }
+
+    private void scheduleDispatch(Object token, int[] pattern, int strength,
+            long delayMillis, long effectDuration) {
+        if (delayMillis <= 0) {
+            if (mRichTapService.isAvailable()) {
+                mRichTapService.richTapVibratorSetAmplitude(strength);
+                mRichTapService.richTapVibratorOn(effectDuration);
+            }
+            return;
+        }
+        mRichTapHandler.postDelayed(() -> {
+            synchronized (mLock) {
+                if (mDispatchToken != token) return;
+            }
+            if (mRichTapService.isAvailable()) {
+                mRichTapService.richTapVibratorSetAmplitude(strength);
+                mRichTapService.richTapVibratorOn(effectDuration);
+            }
+        }, token, delayMillis);
+    }
+
+    private void scheduleCompletion(Object token, long vibrationId, long stepId, long duration) {
+        mRichTapHandler.postDelayed(() -> {
+            synchronized (mLock) {
+                if (mDispatchToken == token) {
+                    mDispatchToken = null;
+                    setRichTapVibratingLocked(false, 1.0f, 0);
+                }
+            }
+            Callbacks callbacks = mCallbacks;
+            if (callbacks != null) {
+                callbacks.onVibrationStepComplete(mVibratorInfo.getId(), vibrationId, stepId);
+            }
+        }, token, duration);
+    }
+
+    private void setRichTapVibratingLocked(boolean vibrating, float amplitude, long duration) {
+        mRichTapDuration = duration;
+        mRichTapVibrating = vibrating;
+        mRichTapAmplitude = vibrating ? amplitude : 1.0f;
+    }
+
+    private void refreshRichTapInfo(VibratorInfo.Builder b) {
+        long caps = b.build().getCapabilities()
+                | IVibrator.CAP_COMPOSE_EFFECTS | IVibrator.CAP_AMPLITUDE_CONTROL;
+        b.setCapabilities(caps);
+        b.setSupportedEffects(new int[]{
+                VibrationEffect.EFFECT_CLICK,
+                VibrationEffect.EFFECT_DOUBLE_CLICK,
+                VibrationEffect.EFFECT_TICK,
+                VibrationEffect.EFFECT_THUD,
+                VibrationEffect.EFFECT_POP,
+                VibrationEffect.EFFECT_HEAVY_CLICK,
+                VibrationEffect.EFFECT_TEXTURE_TICK,
+        });
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 10);
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD, 10);
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_SPIN, 10);
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE, 50);
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_SLOW_RISE, 150);
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_QUICK_FALL, 50);
+        b.setSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, 10);
+        // Exclude PRIMITIVE_LOW_TICK:
+        // AAC linear resonant actuators cannot reproduce low-frequency rumble without
+        // producing an audible mechanical click. Advertising LOW_TICK causes false double
+        // vibrations when touching the navigation gesture bar or invoking Circle to Search.
+        b.removeSupportedPrimitive(VibrationEffect.Composition.PRIMITIVE_LOW_TICK);
+        b.setPrimitiveDelayMax(5000);
+        b.setCompositionSizeMax(100);
     }
 
     @Override
@@ -424,8 +664,29 @@ final class VibratorController implements HalVibrator {
     public boolean off() {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.off");
         try {
+            Object staleToken;
             synchronized (mLock) {
-                mNativeWrapper.off();
+                staleToken = mDispatchToken;
+                mDispatchToken = null;
+                // Skip off() for short effects that self-terminate.
+                if (mRichTapService != null && mRichTapService.isAvailable()
+                        && mRichTapVibrating && mRichTapDuration > 50) {
+                    mRichTapService.richTapVibratorOff();
+                }
+                mRichTapAmplitude = 1.0f;
+                setRichTapVibratingLocked(false, 1.0f, 0);
+            }
+            if (staleToken != null && mRichTapHandler != null) {
+                mRichTapHandler.removeCallbacksAndMessages(staleToken);
+            }
+            // Skip native off() if native HAL was never started.
+            if (mRichTapService == null || !mRichTapService.isAvailable()
+                    || mCurrentState == State.VIBRATING) {
+                synchronized (mLock) {
+                    mNativeWrapper.off();
+                }
+            }
+            synchronized (mLock) {
                 updateStateAndNotifyListenersLocked(State.IDLE);
             }
             return true;
@@ -436,11 +697,19 @@ final class VibratorController implements HalVibrator {
 
     @Override
     public String toString() {
+        boolean richTapVibrating;
+        long richTapDuration;
+        synchronized (mLock) {
+            richTapVibrating = mRichTapVibrating;
+            richTapDuration = mRichTapDuration;
+        }
         return "VibratorController{"
                 + "mVibratorInfo=" + mVibratorInfo
                 + ", mVibratorInfoLoadSuccessful=" + mVibratorInfoLoadSuccessful
                 + ", mCurrentState=" + mCurrentState.name()
                 + ", mCurrentAmplitude=" + mCurrentAmplitude
+                + ", mRichTapVibrating=" + richTapVibrating
+                + ", mRichTapDuration=" + richTapDuration
                 + ", mVibratorStateListeners count="
                 + mVibratorStateListeners.getRegisteredCallbackCount()
                 + '}';

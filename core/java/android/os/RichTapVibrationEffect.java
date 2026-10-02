@@ -28,21 +28,12 @@ import com.android.internal.R;
 public final class RichTapVibrationEffect {
     private static final String TAG = RichTapVibrationEffect.class.getSimpleName();
 
-    // Prevent instantiation
     private RichTapVibrationEffect() {}
 
-    /**
-     * Checks if RichTap vibration is supported on this device.
-     */
     public static boolean isSupported() {
         return Resources.getSystem().getBoolean(R.bool.config_usesRichtapVibration);
     }
 
-    /**
-     * Gets the inner effect pattern for a given vibration effect ID.
-     * @param id The vibration effect ID
-     * @return Array containing the effect pattern, or null if invalid
-     */
     @Nullable
     public static int[] getInnerEffect(int id) {
         switch (id) {
@@ -66,19 +57,34 @@ public final class RichTapVibrationEffect {
         }
     }
 
-    /**
-     * Gets the inner effect strength value for a given strength level.
-     * @param strength The desired effect strength
-     * @return Strength value, or 0 if invalid
-     */
+    public static long getInnerEffectDuration(int id) {
+        switch (id) {
+            case VibrationEffect.EFFECT_CLICK:
+            case VibrationEffect.EFFECT_POP:
+                return 40L;
+            case VibrationEffect.EFFECT_DOUBLE_CLICK:
+                return 110L;
+            case VibrationEffect.EFFECT_TICK:
+                return 25L;
+            case VibrationEffect.EFFECT_THUD:
+                return 60L;
+            case VibrationEffect.EFFECT_HEAVY_CLICK:
+                return 50L;
+            case VibrationEffect.EFFECT_TEXTURE_TICK:
+                return 45L;
+            default:
+                return 30L;
+        }
+    }
+
     public static int getInnerEffectStrength(int strength) {
         switch (strength) {
             case VibrationEffect.EFFECT_STRENGTH_LIGHT:
-                return 150;
+                return 220;
             case VibrationEffect.EFFECT_STRENGTH_MEDIUM:
-                return 200;
+                return 238;
             case VibrationEffect.EFFECT_STRENGTH_STRONG:
-                return 250;
+                return 255;
             default:
                 Slog.e(TAG, "Invalid effect strength: " + strength);
                 return 0;

@@ -18,7 +18,6 @@ package com.android.systemui.axion.volume.ui.composable
 
 import android.content.res.Configuration
 import android.media.AudioManager
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.*
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -84,16 +83,6 @@ fun AxionVolumeDialogContent(
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
         label = "overscroll"
     )
-
-    val isHapticEnabled by viewModel.isHapticEnabled.collectAsStateWithLifecycle()
-    val view = LocalView.current
-    LaunchedEffect(Unit) {
-        viewModel.volumeKeyHapticTrigger.collect {
-            if (isHapticEnabled) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
-        }
-    }
 
     val slideOffset = with(LocalDensity.current) { 48.dp.toPx() }
 
