@@ -57,6 +57,7 @@ import android.os.IBatteryPropertiesRegistrar;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.OsProtoEnums;
+import android.os.Parcel;
 import android.os.PowerManager;
 import android.os.Process;
 import android.os.RemoteException;
@@ -578,6 +579,7 @@ public final class BatteryService extends SystemService {
 
             // Update light state now that mLineageBatteryLights has been initialized.
             updateLedPulse();
+            triggerOemBatteryMetricsFetchAsync(true);
         }
     }
 
@@ -842,6 +844,7 @@ public final class BatteryService extends SystemService {
         synchronized (mLock) {
             if (!mUpdatesStopped) {
                 mHealthInfo = info;
+                applyOemBatteryMetricsLocked();
                 // Process the new values.
                 processValuesLocked(false);
                 mConditionVariable.open();
@@ -849,6 +852,7 @@ public final class BatteryService extends SystemService {
                 copyV1Battery(mLastHealthInfo, info);
             }
         }
+        triggerOemBatteryMetricsFetchAsync(false);
         traceEnd();
     }
 
@@ -1328,6 +1332,297 @@ public final class BatteryService extends SystemService {
                 + path + " " + path2);
         }
         return false;
+    }
+
+    private static final String OEM_CHARGER_AIDL_SERVICE =
+            "vendor.oplus.hardware.charger.ICharger/default";
+    private static final String OEM_CHARGER_AIDL_INTERFACE =
+            "vendor.oplus.hardware.charger.ICharger";
+    private static final int TRANSACTION_GET_PSY_BATTERY_CC = 27; // 0x1b
+    private static final int TRANSACTION_GET_PSY_BATTERY_FCC = 29; // 0x1d
+    private static final int TRANSACTION_GET_UI_SOH_VALUE = 58; // 0x3a
+
+    private static final String OEM_BATTERY_CC_PATH = "/sys/class/oplus_chg/battery/battery_cc";
+    private static final String OEM_BATTERY_DESIGN_PATH = "/sys/class/oplus_chg/battery/design_capacity";
+    private static final String OEM_BATTERY_FCC_PATH = "/sys/class/oplus_chg/battery/battery_fcc";
+    private static final String[] OEM_BATTERY_SOH_PATHS = {
+        "/sys/class/oplus_chg/battery/battery_ui_soh",
+        "/sys/class/oplus_chg/battery/ui_soh",
+        "/sys/class/oplus_chg/battery/battery_soh",
+    };
+
+    private final Object mOemMetricsLock = new Object();
+    private boolean mOemMetricsFetchInProgress = false;
+    private long mLastOemMetricsFetchTime = 0;
+    private static final long OEM_METRICS_FETCH_INTERVAL_MS = 60_000;
+
+    private int mCachedOemDesignCapacityUah = -1;
+    private int mCachedOemCycleCount = -1;
+    private int mCachedOemFullChargeUah = -1;
+
+    private IBinder mOemChargerBinder = null;
+
+    private IBinder getOemChargerBinder() {
+        if (mOemChargerBinder != null && mOemChargerBinder.pingBinder()) {
+            return mOemChargerBinder;
+        }
+        try {
+            IBinder binder = ServiceManager.checkService(OEM_CHARGER_AIDL_SERVICE);
+            if (binder != null) {
+                mOemChargerBinder = binder;
+                return mOemChargerBinder;
+            }
+        } catch (Exception e) {
+            if (DEBUG) {
+                Slog.w(TAG, "Failed to get " + OEM_CHARGER_AIDL_SERVICE, e);
+            }
+        }
+        return null;
+    }
+
+    private int callOemChargerIntMethod(int transactionCode) {
+        IBinder binder = getOemChargerBinder();
+        if (binder == null) {
+            return -1;
+        }
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(OEM_CHARGER_AIDL_INTERFACE);
+            boolean status = binder.transact(transactionCode, data, reply, 0);
+            if (status) {
+                reply.readException();
+                return reply.readInt();
+            }
+        } catch (Exception e) {
+            if (DEBUG) {
+                Slog.w(TAG, "Failed calling ICharger transaction " + transactionCode, e);
+            }
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+        return -1;
+    }
+
+    private void applyOemBatteryMetricsLocked() {
+        if (mHealthInfo == null) {
+            return;
+        }
+        int designCap;
+        int cycleCount;
+        int fullCharge;
+        synchronized (mOemMetricsLock) {
+            designCap = mCachedOemDesignCapacityUah;
+            cycleCount = mCachedOemCycleCount;
+            fullCharge = mCachedOemFullChargeUah;
+        }
+        if (designCap > 0) {
+            mHealthInfo.batteryFullChargeDesignCapacityUah = designCap;
+        }
+        if (cycleCount > 0 && mHealthInfo.batteryCycleCount <= 0) {
+            mHealthInfo.batteryCycleCount = cycleCount;
+        }
+        if (fullCharge > 0) {
+            mHealthInfo.batteryFullChargeUah = fullCharge;
+        }
+    }
+
+    private void triggerOemBatteryMetricsFetchAsync(boolean force) {
+        synchronized (mOemMetricsLock) {
+            if (mOemMetricsFetchInProgress) {
+                return;
+            }
+            long now = SystemClock.elapsedRealtime();
+            if (!force && (now - mLastOemMetricsFetchTime < OEM_METRICS_FETCH_INTERVAL_MS)) {
+                return;
+            }
+            mOemMetricsFetchInProgress = true;
+        }
+        IoThread.getHandler().post(this::fetchOemBatteryMetricsBackground);
+    }
+
+    private void fetchOemBatteryMetricsBackground() {
+        int designCapacityUah = -1;
+        int cycleCount = -1;
+        int fullChargeUah = -1;
+
+        try {
+            // 1. Ensure battery design capacity is set
+            synchronized (mOemMetricsLock) {
+                designCapacityUah = mCachedOemDesignCapacityUah;
+            }
+            if (designCapacityUah <= 0) {
+                try {
+                    com.android.internal.os.PowerProfile profile =
+                            new com.android.internal.os.PowerProfile(mContext);
+                    double capMah = profile.getBatteryCapacity();
+                    if (capMah > 0) {
+                        designCapacityUah = (int) Math.round(capMah * 1000.0);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (designCapacityUah <= 0) {
+                File desFile = new File(OEM_BATTERY_DESIGN_PATH);
+                if (desFile.exists()) {
+                    try {
+                        String desStr = FileUtils.readTextFile(desFile, 0, null).trim();
+                        int des = Integer.parseInt(desStr);
+                        if (des > 0) {
+                            designCapacityUah = des > 100_000 ? des : des * 1000;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            if (designCapacityUah <= 0) {
+                designCapacityUah = 5500000;
+            }
+
+            // 2. Battery cycle count
+            int cc = callOemChargerIntMethod(TRANSACTION_GET_PSY_BATTERY_CC);
+            if (cc > 0) {
+                cycleCount = cc;
+            } else {
+                File ccFile = new File(OEM_BATTERY_CC_PATH);
+                if (ccFile.exists()) {
+                    try {
+                        String ccStr = FileUtils.readTextFile(ccFile, 0, null).trim();
+                        int fileCc = Integer.parseInt(ccStr);
+                        if (fileCc > 0) {
+                            cycleCount = fileCc;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+
+            // 3. Try reading OEM State of Health (SOH) first (calibrated BMS wear metric, e.g. 96%)
+            // Priority A: OEM Charger AIDL HAL (matches stock OxygenOS OplusBatteryManager / ICharger.getUIsohValue)
+            int soh = callOemChargerIntMethod(TRANSACTION_GET_UI_SOH_VALUE);
+            if (soh > 0 && soh <= 100) {
+                fullChargeUah = (int) (((long) designCapacityUah * soh) / 100);
+            } else {
+                // Priority B: sysfs SOH paths (battery_ui_soh, ui_soh, battery_soh)
+                String sohConfigPath = null;
+                try {
+                    sohConfigPath = mContext.getResources().getString(
+                            com.android.internal.R.string.config_batterySohPath);
+                } catch (Exception ignored) {
+                    try {
+                        int resId = mContext.getResources().getIdentifier(
+                                "config_batterySohPath", "string", "android");
+                        if (resId != 0) {
+                            sohConfigPath = mContext.getResources().getString(resId);
+                        }
+                    } catch (Exception e2) {
+                    }
+                }
+                if (!TextUtils.isEmpty(sohConfigPath)) {
+                    sohConfigPath = sohConfigPath.replace("\"", "").trim();
+                }
+
+                java.util.List<String> sohPaths = new java.util.ArrayList<>();
+                if (!TextUtils.isEmpty(sohConfigPath)) {
+                    sohPaths.add(sohConfigPath);
+                }
+                for (String p : OEM_BATTERY_SOH_PATHS) {
+                    if (!sohPaths.contains(p)) {
+                        sohPaths.add(p);
+                    }
+                }
+
+                for (String p : sohPaths) {
+                    File sohFile = new File(p);
+                    if (sohFile.exists()) {
+                        try {
+                            String value = FileUtils.readTextFile(sohFile, 0, null).trim();
+                            if (!TextUtils.isEmpty(value)) {
+                                int fileSoh = Integer.parseInt(value);
+                                if (fileSoh > 0 && fileSoh <= 100) {
+                                    fullChargeUah = (int) (((long) designCapacityUah * fileSoh) / 100);
+                                    break;
+                                }
+                            }
+                        } catch (Exception e) {
+                            if (DEBUG) {
+                                Slog.w(TAG, "Failed to read battery SOH from: " + p, e);
+                            }
+                        }
+                    }
+                }
+
+                // 4. Fallback to full charge capacity (FCC) if SOH is unavailable
+                if (fullChargeUah <= 0) {
+                    int halFcc = callOemChargerIntMethod(TRANSACTION_GET_PSY_BATTERY_FCC);
+                    if (halFcc > 0) {
+                        fullChargeUah = halFcc > 100_000 ? halFcc : halFcc * 1000;
+                    } else {
+                        String path = null;
+                        try {
+                            path = mContext.getResources().getString(
+                                    com.android.internal.R.string.config_batteryMaximumCapacityPath);
+                        } catch (Exception ignored) {
+                            try {
+                                int resId = mContext.getResources().getIdentifier(
+                                        "config_batteryMaximumCapacityPath", "string", "android");
+                                if (resId != 0) {
+                                    path = mContext.getResources().getString(resId);
+                                }
+                            } catch (Exception e2) {
+                            }
+                        }
+                        if (!TextUtils.isEmpty(path)) {
+                            path = path.replace("\"", "").trim();
+                        }
+                        if (TextUtils.isEmpty(path)) {
+                            path = OEM_BATTERY_FCC_PATH;
+                        }
+
+                        File file = new File(path);
+                        if (file.exists()) {
+                            try {
+                                String value = FileUtils.readTextFile(file, 0, null).trim();
+                                if (!TextUtils.isEmpty(value)) {
+                                    int fcc = Integer.parseInt(value);
+                                    if (fcc > 0) {
+                                        // Some kernels report in mAh (e.g. 5050), others in µAh (e.g. 5050000)
+                                        fullChargeUah = fcc > 100_000 ? fcc : fcc * 1000;
+                                    }
+                                }
+                            } catch (Exception e) {
+                                Slog.e(TAG, "Failed to read battery maximum capacity from: " + path, e);
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            boolean changed = false;
+            synchronized (mOemMetricsLock) {
+                if (designCapacityUah > 0) {
+                    mCachedOemDesignCapacityUah = designCapacityUah;
+                }
+                if (cycleCount > 0) {
+                    mCachedOemCycleCount = cycleCount;
+                }
+                if (fullChargeUah > 0) {
+                    mCachedOemFullChargeUah = fullChargeUah;
+                }
+                mLastOemMetricsFetchTime = SystemClock.elapsedRealtime();
+                mOemMetricsFetchInProgress = false;
+                changed = (fullChargeUah > 0 || cycleCount > 0 || designCapacityUah > 0);
+            }
+
+            if (changed) {
+                synchronized (mLock) {
+                    if (mHealthInfo != null) {
+                        applyOemBatteryMetricsLocked();
+                    }
+                }
+            }
+        }
     }
 
     // TODO: Current code doesn't work since "--unplugged" flag in BSS was purposefully removed.
@@ -2052,7 +2347,36 @@ public final class BatteryService extends SystemService {
                             android.Manifest.permission.BATTERY_STATS, null);
                     break;
             }
-            return mHealthServiceWrapper.getProperty(id, prop);
+
+            int result = mHealthServiceWrapper.getProperty(id, prop);
+            if (id == BatteryManager.BATTERY_PROPERTY_STATE_OF_HEALTH && (result != 0 || prop.getLong() <= 0)) {
+                int fullCharge;
+                int designCap;
+                synchronized (mOemMetricsLock) {
+                    fullCharge = mCachedOemFullChargeUah;
+                    designCap = mCachedOemDesignCapacityUah;
+                }
+                if (fullCharge > 0 && designCap > 0) {
+                    int soh = (int) Math.round(((double) fullCharge * 100.0) / designCap);
+                    if (soh > 0 && soh <= 100) {
+                        prop.setLong(soh);
+                        return 0;
+                    }
+                }
+                synchronized (mLock) {
+                    if (mHealthInfo != null && mHealthInfo.batteryFullChargeUah > 0
+                            && mHealthInfo.batteryFullChargeDesignCapacityUah > 0) {
+                        int soh = (int) Math.round(
+                                ((double) mHealthInfo.batteryFullChargeUah * 100.0)
+                                / mHealthInfo.batteryFullChargeDesignCapacityUah);
+                        if (soh > 0 && soh <= 100) {
+                            prop.setLong(soh);
+                            return 0;
+                        }
+                    }
+                }
+            }
+            return result;
         }
         @Override
         public void scheduleUpdate() throws RemoteException {
