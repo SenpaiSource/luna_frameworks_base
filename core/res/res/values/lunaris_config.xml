@@ -32,6 +32,12 @@
     <!-- Expected value from fast charging status file  -->
     <string name="config_oemFastChargerStatusValue" translatable="false">1</string>
 
+    <!-- Path to battery state of health (SOH) sysfs file (e.g. 96%) -->
+    <string name="config_batterySohPath" translatable="false"></string>
+
+    <!-- Path to battery maximum capacity sysfs file to read real degraded capacity (FCC) -->
+    <string name="config_batteryMaximumCapacityPath" translatable="false"></string>
+
     <!-- Any package that has one of the package names defined below will be prevented
        from using specific sensors in order to stop battery drain -->
     <string-array name="config_blockPackagesSensorDrain">
