@@ -5180,6 +5180,12 @@ public abstract class Context {
     public static final String VIBRATOR_SERVICE = "vibrator";
 
     /**
+     * @hide
+     */
+    @SuppressLint("ServiceName")
+    public static final String LINEARMOTOR_VIBRATOR_SERVICE = "linearmotor_vibrator";
+
+    /**
      * Use with {@link #getSystemService(String)} to retrieve a {@link
      * android.app.StatusBarManager} for interacting with the status bar and quick settings.
      *
