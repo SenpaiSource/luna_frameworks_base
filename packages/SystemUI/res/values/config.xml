@@ -556,6 +556,7 @@
     <!-- SystemUI Plugins that can be loaded on user builds. -->
     <string-array name="config_pluginAllowlist" translatable="false">
         <item>com.android.systemui</item>
+        <item>org.lineageos.settings.device</item>
     </string-array>
 
     <!-- Launcher package name for overlaying icons. -->
