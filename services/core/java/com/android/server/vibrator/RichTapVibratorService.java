@@ -26,6 +26,9 @@ import android.util.Slog;
 import vendor.aac.hardware.richtap.vibrator.IRichtapCallback;
 import vendor.aac.hardware.richtap.vibrator.IRichtapVibrator;
 
+/**
+ * Service class managing RichTap vibrator functionality.
+ */
 public class RichTapVibratorService {
     private static final String TAG = RichTapVibratorService.class.getSimpleName();
     private static final String VIBRATOR_DESCRIPTOR = IVibrator.DESCRIPTOR + "/default";
@@ -34,9 +37,76 @@ public class RichTapVibratorService {
 
     @NonNull
     private final IRichtapCallback mCallback;
-
-    // Volatile so isAvailable() is a cheap field read with no IPC on the hot path.
     private volatile IRichtapVibrator sRichtapVibratorService = null;
+
+    public void init() {
+        getRichtapService();
+    }
+
+    @Nullable
+    private synchronized IRichtapVibrator getRichtapService() {
+        if (sRichtapVibratorService != null) {
+            IBinder binder = sRichtapVibratorService.asBinder();
+            if (!binder.isBinderAlive() || !binder.pingBinder()) {
+                Slog.w(TAG, "RichTap service binder is dead, clearing proxy");
+                sRichtapVibratorService = null;
+            }
+        }
+
+        if (sRichtapVibratorService == null) {
+            if (DEBUG) Slog.d(TAG, "Connecting to vibrator service: " + VIBRATOR_DESCRIPTOR);
+
+            IBinder halBinder;
+            if (ServiceManager.isDeclared(VIBRATOR_DESCRIPTOR)) {
+                halBinder = Binder.allowBlocking(
+                        ServiceManager.waitForDeclaredService(VIBRATOR_DESCRIPTOR));
+            } else {
+                halBinder = ServiceManager.getService(VIBRATOR_DESCRIPTOR);
+                if (halBinder != null) {
+                    halBinder = Binder.allowBlocking(halBinder);
+                }
+            }
+
+            if (halBinder == null) {
+                Slog.w(TAG, "Failed to get HAL service binder for " + VIBRATOR_DESCRIPTOR);
+                return null;
+            }
+
+            IVibrator vibratorHalService = IVibrator.Stub.asInterface(halBinder);
+
+            if (DEBUG) {
+                try {
+                    Slog.d(TAG, "Capabilities: " + vibratorHalService.getCapabilities());
+                } catch (Exception e) {
+                    Slog.w(TAG, "Failed to get capabilities", e);
+                }
+            }
+
+            try {
+                IBinder extBinder = halBinder.getExtension();
+                if (extBinder != null) {
+                    extBinder = Binder.allowBlocking(extBinder);
+                    IRichtapVibrator richtapService = IRichtapVibrator.Stub.asInterface(extBinder);
+                    VibHalDeathRecipient deathRecipient = new VibHalDeathRecipient(this);
+                    try {
+                        halBinder.linkToDeath(deathRecipient, 0);
+                        extBinder.linkToDeath(deathRecipient, 0);
+                        richtapService.init(mCallback);
+                        sRichtapVibratorService = richtapService;
+                        Slog.i(TAG, "RichTap service connected and initialized successfully");
+                    } catch (Exception e) {
+                        Slog.e(TAG, "Failed to init RichTap service or link death recipient", e);
+                        sRichtapVibratorService = null;
+                    }
+                } else {
+                    Slog.e(TAG, "Extension binder is null");
+                }
+            } catch (Exception e) {
+                Slog.e(TAG, "Failed to get extension", e);
+            }
+        }
+        return sRichtapVibratorService;
+    }
 
     public RichTapVibratorService() {
         this(null);
@@ -61,69 +131,11 @@ public class RichTapVibratorService {
         };
     }
 
-    /**
-     * Attempt a non-blocking connection to the RichTap HAL.
-     * Safe to call from any thread. Does NOT block — uses getService() only.
-     */
-    public void init() {
-        getRichtapService();
-    }
-
-    /**
-     * Returns true if the RichTap HAL is currently connected.
-     * This is a volatile field read — zero IPC, safe on any hot path.
-     */
-    public boolean isAvailable() {
-        return sRichtapVibratorService != null;
-    }
-
-    /**
-     * Non-blocking HAL connection attempt. Returns null if HAL is not yet available.
-     * No pingBinder() — the death recipient handles stale proxy cleanup.
-     */
-    @Nullable
-    private synchronized IRichtapVibrator getRichtapService() {
-        if (sRichtapVibratorService != null) {
-            return sRichtapVibratorService;
-        }
-
-        if (DEBUG) Slog.d(TAG, "Connecting to: " + VIBRATOR_DESCRIPTOR);
-
-        // Non-blocking: getService() returns null immediately if HAL is not up.
-        // We never call waitForDeclaredService() here to avoid blocking any thread.
-        IBinder halBinder = ServiceManager.getService(VIBRATOR_DESCRIPTOR);
-        if (halBinder == null) {
-            if (DEBUG) Slog.d(TAG, "HAL not yet available, will retry on next call");
-            return null;
-        }
-        halBinder = Binder.allowBlocking(halBinder);
-
-        try {
-            IBinder extBinder = halBinder.getExtension();
-            if (extBinder == null) {
-                Slog.e(TAG, "Extension binder is null");
-                return null;
-            }
-            extBinder = Binder.allowBlocking(extBinder);
-            IRichtapVibrator richtapService = IRichtapVibrator.Stub.asInterface(extBinder);
-            VibHalDeathRecipient deathRecipient = new VibHalDeathRecipient(this);
-            halBinder.linkToDeath(deathRecipient, 0);
-            extBinder.linkToDeath(deathRecipient, 0);
-            richtapService.init(mCallback);
-            sRichtapVibratorService = richtapService;
-            Slog.i(TAG, "RichTap HAL connected");
-        } catch (Exception e) {
-            Slog.e(TAG, "Failed to connect to RichTap HAL", e);
-            sRichtapVibratorService = null;
-        }
-        return sRichtapVibratorService;
-    }
-
     public void richTapVibratorOn(long millis) {
         try {
             IRichtapVibrator service = getRichtapService();
             if (service != null) {
-                if (DEBUG) Slog.d(TAG, "vibratorOn " + millis + "ms");
+                if (DEBUG) Slog.d(TAG, "Executing vibratorOn");
                 service.on((int) millis, mCallback);
             }
         } catch (Exception e) {
@@ -134,9 +146,9 @@ public class RichTapVibratorService {
 
     public void richTapVibratorOff() {
         try {
-            IRichtapVibrator service = sRichtapVibratorService;
+            IRichtapVibrator service = getRichtapService();
             if (service != null) {
-                if (DEBUG) Slog.d(TAG, "vibratorOff");
+                if (DEBUG) Slog.d(TAG, "Executing vibratorOff");
                 service.stop(mCallback);
                 service.off(mCallback);
             }
@@ -146,11 +158,15 @@ public class RichTapVibratorService {
         }
     }
 
+    public boolean isAvailable() {
+        return getRichtapService() != null;
+    }
+
     public void richTapVibratorSetAmplitude(int amplitude) {
         try {
             IRichtapVibrator service = getRichtapService();
             if (service != null) {
-                if (DEBUG) Slog.d(TAG, "setAmplitude " + amplitude);
+                if (DEBUG) Slog.d(TAG, "Setting amplitude: " + amplitude);
                 service.setAmplitude(amplitude, mCallback);
             }
         } catch (Exception e) {
@@ -163,7 +179,10 @@ public class RichTapVibratorService {
         try {
             IRichtapVibrator service = getRichtapService();
             if (service != null) {
-                if (DEBUG) Slog.d(TAG, "performHe amplitude=" + amplitude + " freq=" + freq);
+                if (DEBUG) {
+                    Slog.d(TAG, "Executing raw pattern with amplitude: " +
+                            amplitude + ", freq: " + freq);
+                }
                 service.performHe(RICHTAP_LOOPER_ONCE, 0, amplitude, freq, pattern, mCallback);
             }
         } catch (Exception e) {
@@ -173,7 +192,9 @@ public class RichTapVibratorService {
     }
 
     void resetHalServiceProxy() {
-        sRichtapVibratorService = null;
+        synchronized (this) {
+            sRichtapVibratorService = null;
+        }
     }
 
     private static final class VibHalDeathRecipient implements IBinder.DeathRecipient {
@@ -186,7 +207,9 @@ public class RichTapVibratorService {
         @Override
         public void binderDied() {
             Slog.w(TAG, "Vibrator HAL died, resetting proxy");
-            mRichTapService.resetHalServiceProxy();
+            synchronized (mRichTapService) {
+                mRichTapService.resetHalServiceProxy();
+            }
         }
     }
 }

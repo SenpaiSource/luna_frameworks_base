@@ -274,26 +274,20 @@ final class VibratorController implements HalVibrator {
     public long on(long vibrationId, long stepId, long milliseconds) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onMillis");
         try {
-            if (mRichTapService != null) {
-                if (mRichTapService.isAvailable()) {
-                    Object token = newDispatchToken();
-                    int strength = (int) (255 * mRichTapAmplitude);
-                    if (strength > 0 && strength < 200) {
-                        strength = 200;
-                    }
-                    mRichTapService.richTapVibratorSetAmplitude(strength);
-                    mRichTapService.richTapVibratorOn(milliseconds);
-                    synchronized (mLock) {
-                        mDispatchToken = token;
-                        setRichTapVibratingLocked(true, mRichTapAmplitude, milliseconds);
-                    }
-                    scheduleCompletion(token, vibrationId, stepId, milliseconds);
-                    return milliseconds;
+            if (mRichTapService != null && mRichTapService.isAvailable()) {
+                Object token = newDispatchToken();
+                int strength = (int) (255 * mRichTapAmplitude);
+                if (strength > 0 && strength < 200) {
+                    strength = 200;
                 }
-                // HAL died — trigger reconnect for next call.
-                final RichTapVibratorService richTap = mRichTapService;
-                mRichTapHandler.post(() -> richTap.init());
-                return 0;
+                mRichTapService.richTapVibratorSetAmplitude(strength);
+                mRichTapService.richTapVibratorOn(milliseconds);
+                synchronized (mLock) {
+                    mDispatchToken = token;
+                    setRichTapVibratingLocked(true, mRichTapAmplitude, milliseconds);
+                }
+                scheduleCompletion(token, vibrationId, stepId, milliseconds);
+                return milliseconds;
             }
             synchronized (mLock) {
                 long duration = mNativeWrapper.on(milliseconds, vibrationId, stepId);
@@ -333,10 +327,10 @@ final class VibratorController implements HalVibrator {
     public long on(long vibrationId, long stepId, PrebakedSegment prebaked) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onPrebaked");
         try {
-            if (mRichTapService != null) {
+            if (mRichTapService != null && mRichTapService.isAvailable()) {
                 long duration = RichTapVibrationEffect.getInnerEffectDuration(
                         prebaked.getEffectId());
-                if (duration > 0 && mRichTapService.isAvailable()) {
+                if (duration > 0) {
                     Object token = newDispatchToken();
                     int strength = RichTapVibrationEffect.getInnerEffectStrength(
                             prebaked.getEffectStrength());
@@ -370,7 +364,6 @@ final class VibratorController implements HalVibrator {
                     scheduleCompletion(token, vibrationId, stepId, duration);
                     return duration;
                 }
-                return 0;
             }
             synchronized (mLock) {
                 long duration = mNativeWrapper.perform(prebaked.getEffectId(),
@@ -389,12 +382,9 @@ final class VibratorController implements HalVibrator {
     public long on(long vibrationId, long stepId, PrimitiveSegment[] primitives) {
         Trace.traceBegin(TRACE_TAG_VIBRATOR, "HalVibrator.onPrimitives");
         try {
-            if (mRichTapService != null) {
-                if (mRichTapService.isAvailable()
-                        && primitives != null && primitives.length > 0) {
-                    return dispatchRichTapPrimitives(vibrationId, stepId, primitives);
-                }
-                return 0;
+            if (mRichTapService != null && mRichTapService.isAvailable()
+                    && primitives != null && primitives.length > 0) {
+                return dispatchRichTapPrimitives(vibrationId, stepId, primitives);
             }
             if (!mVibratorInfo.hasCapability(IVibrator.CAP_COMPOSE_EFFECTS)) {
                 return 0;
