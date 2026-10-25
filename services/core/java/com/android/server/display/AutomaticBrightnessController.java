@@ -950,17 +950,34 @@ public class AutomaticBrightnessController {
         mSlowAmbientLux = calculateAmbientLux(time, mAmbientLightHorizonLong);
         mFastAmbientLux = calculateAmbientLux(time, mAmbientLightHorizonShort);
 
-        if ((mSlowAmbientLux >= mAmbientBrighteningThreshold
-                && mFastAmbientLux >= mAmbientBrighteningThreshold
-                && nextBrightenTransition <= time)
+        // Fast brightening acceleration:
+        // Detect monotonically increasing ambient light trend (>= 2 samples) to react immediately
+        // once debounce elapses, avoiding slow convergence delay over the long horizon.
+        final boolean isUpwardTrend = mAmbientLightRingBuffer.isMonotonicIncreasing(2);
+        final boolean shouldFastBrighten = isUpwardTrend
+                && (mFastAmbientLux >= mAmbientBrighteningThreshold
+                        || (mAmbientLightRingBuffer.size() > 0
+                                && mAmbientLightRingBuffer.getLux(mAmbientLightRingBuffer.size() - 1)
+                                        >= mAmbientBrighteningThreshold))
+                && nextBrightenTransition <= time;
+
+        if ((shouldFastBrighten
+                || (mSlowAmbientLux >= mAmbientBrighteningThreshold
+                        && mFastAmbientLux >= mAmbientBrighteningThreshold
+                        && nextBrightenTransition <= time))
                 || (mSlowAmbientLux <= mAmbientDarkeningThreshold
                         && mFastAmbientLux <= mAmbientDarkeningThreshold
                         && nextDarkenTransition <= time)) {
             mPreThresholdLux = mAmbientLux;
-            setAmbientLux(mFastAmbientLux);
+            float targetLux = mFastAmbientLux;
+            if (shouldFastBrighten && mAmbientLightRingBuffer.size() > 0) {
+                float latestLux = mAmbientLightRingBuffer.getLux(mAmbientLightRingBuffer.size() - 1);
+                targetLux = Math.max(targetLux, 0.8f * latestLux + 0.2f * mFastAmbientLux);
+            }
+            setAmbientLux(targetLux);
             if (mLoggingEnabled) {
                 Slog.d(TAG, "updateAmbientLux: "
-                        + ((mFastAmbientLux > mPreThresholdLux) ? "Brightened" : "Darkened") + ": "
+                        + ((targetLux > mPreThresholdLux) ? "Brightened" : "Darkened") + ": "
                         + "mAmbientBrighteningThreshold=" + mAmbientBrighteningThreshold + ", "
                         + "mAmbientDarkeningThreshold=" + mAmbientDarkeningThreshold + ", "
                         + "mAmbientLightRingBuffer=" + mAmbientLightRingBuffer + ", "
@@ -1620,6 +1637,21 @@ public class AutomaticBrightnessController {
             mStart = 0;
             mEnd = 0;
             mCount = 0;
+        }
+
+        public boolean isMonotonicIncreasing(int count) {
+            if (mCount < count || count <= 1) {
+                return false;
+            }
+            float lastLux = getLux(mCount - count);
+            for (int i = mCount - count + 1; i < mCount; i++) {
+                float currentLux = getLux(i);
+                if (currentLux < lastLux) {
+                    return false;
+                }
+                lastLux = currentLux;
+            }
+            return getLux(mCount - 1) > getLux(mCount - count);
         }
 
         @Override
