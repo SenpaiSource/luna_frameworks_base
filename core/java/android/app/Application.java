@@ -354,11 +354,6 @@ public class Application extends ContextWrapper implements ComponentCallbacks2 {
     @UnsupportedAppUsage
     /* package */ final void attach(Context context) {
         attachBaseContext(context);
-        setLoadedApk(context);
-    }
-
-    @android.ravenwood.annotation.RavenwoodIgnore(blockedBy = LoadedApk.class)
-    private void setLoadedApk(Context context) {
         mLoadedApk = ContextImpl.getImpl(context).mPackageInfo;
     }
 
