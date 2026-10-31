@@ -70,6 +70,8 @@ public class SystemSettings {
                 Settings.System.TTY_MODE,
                 Settings.System.MASTER_MONO,
                 Settings.System.MASTER_BALANCE,
+                Settings.System.SPATIAL_AUDIO_SCENE,
+                Settings.System.SPATIAL_AUDIO_LEVEL,
                 Settings.System.FOLD_LOCK_BEHAVIOR,
                 Settings.System.SOUND_EFFECTS_ENABLED,
                 Settings.System.HAPTIC_FEEDBACK_ENABLED,

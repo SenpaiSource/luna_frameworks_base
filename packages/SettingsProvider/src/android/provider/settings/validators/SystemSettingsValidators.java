@@ -193,6 +193,8 @@ public class SystemSettingsValidators {
         VALIDATORS.put(System.VIBRATE_INPUT_DEVICES, BOOLEAN_VALIDATOR);
         VALIDATORS.put(System.MASTER_MONO, BOOLEAN_VALIDATOR);
         VALIDATORS.put(System.MASTER_BALANCE, new InclusiveFloatRangeValidator(-1.f, 1.f));
+        VALIDATORS.put(System.SPATIAL_AUDIO_SCENE, new InclusiveIntegerRangeValidator(0, 4));
+        VALIDATORS.put(System.SPATIAL_AUDIO_LEVEL, new InclusiveIntegerRangeValidator(1, 5));
         VALIDATORS.put(System.NOTIFICATIONS_USE_RING_VOLUME, BOOLEAN_VALIDATOR);
         VALIDATORS.put(System.VIBRATE_IN_SILENT, BOOLEAN_VALIDATOR);
         VALIDATORS.put(System.MEDIA_BUTTON_RECEIVER, COMPONENT_NAME_VALIDATOR);

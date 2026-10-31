@@ -5765,6 +5765,23 @@ public final class Settings {
         public static final String MASTER_BALANCE = "master_balance";
 
         /**
+         * Spatial audio acoustic scene profile.
+         * 0 = Movie, 1 = Music, 2 = Game 1, 3 = Game 2, 4 = Voice
+         *
+         * @hide
+         */
+        @Readable
+        public static final String SPATIAL_AUDIO_SCENE = "spatial_audio_scene";
+
+        /**
+         * Spatial audio soundstage widening intensity level (1 to 5).
+         *
+         * @hide
+         */
+        @Readable
+        public static final String SPATIAL_AUDIO_LEVEL = "spatial_audio_level";
+
+        /**
          * Whether the notifications should use the ring volume (value of 1) or
          * a separate notification volume (value of 0). In most cases, users
          * will have this enabled so the notification and ringer volumes will be
@@ -8336,6 +8353,8 @@ public final class Settings {
             PRIVATE_SETTINGS.add(VOLUME_MASTER);
             PRIVATE_SETTINGS.add(MASTER_MONO);
             PRIVATE_SETTINGS.add(MASTER_BALANCE);
+            PRIVATE_SETTINGS.add(SPATIAL_AUDIO_SCENE);
+            PRIVATE_SETTINGS.add(SPATIAL_AUDIO_LEVEL);
             PRIVATE_SETTINGS.add(NOTIFICATIONS_USE_RING_VOLUME);
             PRIVATE_SETTINGS.add(VIBRATE_IN_SILENT);
             PRIVATE_SETTINGS.add(MEDIA_BUTTON_RECEIVER);

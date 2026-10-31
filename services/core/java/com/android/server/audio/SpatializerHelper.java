@@ -23,8 +23,10 @@ import static android.media.AudioSystem.isBluetoothLeDevice;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.database.ContentObserver;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.media.AudioAttributes;
@@ -42,10 +44,16 @@ import android.media.ISpatializerHeadTrackingModeCallback;
 import android.media.ISpatializerOutputCallback;
 import android.media.MediaMetrics;
 import android.media.Spatializer;
+import android.media.audiofx.AudioEffect;
 import android.media.audio.common.HeadTracking;
 import android.media.audio.common.Spatialization;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
+import android.os.UserHandle;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.Pair;
@@ -149,6 +157,16 @@ public class SpatializerHelper {
     private @Nullable SpatializerHeadTrackingCallback mSpatHeadTrackingCallback =
             new SpatializerHeadTrackingCallback();
     private @Nullable HelperDynamicSensorCallback mDynSensorCallback;
+
+    // OPlus Spatializer vendor effect parameters
+    private static final int OPLUS_PARAM_SPAT_SCENE = 0x100100bd;
+    private static final int OPLUS_PARAM_SPAT_LEVEL = 0x100100be;
+    private static final int DEFAULT_SPATIAL_AUDIO_SCENE = 0;
+    private static final int DEFAULT_SPATIAL_AUDIO_LEVEL = 3;
+
+    private int mSpatialAudioScene = DEFAULT_SPATIAL_AUDIO_SCENE;
+    private int mSpatialAudioLevel = DEFAULT_SPATIAL_AUDIO_LEVEL;
+    private @Nullable ContentObserver mSpatialSettingsObserver;
 
     // default attributes and format that determine basic availability of spatialization
     private static final AudioAttributes DEFAULT_ATTRIBUTES = new AudioAttributes.Builder()
@@ -321,6 +339,7 @@ public class SpatializerHelper {
         }
         mState = STATE_DISABLED_UNAVAILABLE;
         sRoutingDevices = getRoutingDevices(DEFAULT_ATTRIBUTES);
+        registerSpatialSettingsObserver();
         // note at this point mSpat is still not instantiated
     }
 
@@ -406,6 +425,9 @@ public class SpatializerHelper {
             loglogi("Setting spatialization level to: " + level);
             try {
                 mSpat.setLevel(level);
+                if (enabled) {
+                    applyOplusSpatializerParameters();
+                }
             } catch (RemoteException e) {
                 Log.e(TAG, "onRoutingUpdated() Can't set spatializer level", e);
                 // try to recover by resetting the native spatializer state
@@ -434,6 +456,9 @@ public class SpatializerHelper {
             loglogi("SpatializerCallback.onLevelChanged level:" + level);
             synchronized (SpatializerHelper.this) {
                 mSpatLevel = spatializationLevelToSpatializerInt(level);
+                if (mSpatLevel != Spatializer.SPATIALIZER_IMMERSIVE_LEVEL_NONE) {
+                    applyOplusSpatializerParameters();
+                }
             }
             // TODO use reported spat level to change state
 
@@ -447,6 +472,9 @@ public class SpatializerHelper {
             synchronized (SpatializerHelper.this) {
                 oldOutput = mSpatOutput;
                 mSpatOutput = output;
+                if (output != 0) {
+                    applyOplusSpatializerParameters();
+                }
             }
             if (oldOutput != output) {
                 dispatchOutputUpdate(output);
@@ -1059,6 +1087,7 @@ public class SpatializerHelper {
                 mCapableSpatLevel = Spatializer.SPATIALIZER_IMMERSIVE_LEVEL_NONE;
                 mActualHeadTrackingMode = Spatializer.HEAD_TRACKING_MODE_UNSUPPORTED;
             }
+            applyOplusSpatializerParameters();
         }
     }
 
@@ -1407,6 +1436,62 @@ public class SpatializerHelper {
     }
 
     //------------------------------------------------------
+    // OPlus Spatializer parameter configuration
+
+    private void registerSpatialSettingsObserver() {
+        ContentResolver cr = mAudioService.getContentResolver();
+        if (cr == null || mSpatialSettingsObserver != null) {
+            return;
+        }
+        mSpatialSettingsObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
+            @Override
+            public void onChange(boolean selfChange, Uri uri) {
+                updateOplusSpatializerParameters();
+            }
+        };
+        cr.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.SPATIAL_AUDIO_SCENE),
+                false, mSpatialSettingsObserver, UserHandle.USER_ALL);
+        cr.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.SPATIAL_AUDIO_LEVEL),
+                false, mSpatialSettingsObserver, UserHandle.USER_ALL);
+        loadOplusSpatializerSettings(cr);
+    }
+
+    private void loadOplusSpatializerSettings(@NonNull ContentResolver cr) {
+        mSpatialAudioScene = Settings.System.getIntForUser(
+                cr, Settings.System.SPATIAL_AUDIO_SCENE, DEFAULT_SPATIAL_AUDIO_SCENE,
+                UserHandle.USER_CURRENT);
+        mSpatialAudioLevel = Settings.System.getIntForUser(
+                cr, Settings.System.SPATIAL_AUDIO_LEVEL, DEFAULT_SPATIAL_AUDIO_LEVEL,
+                UserHandle.USER_CURRENT);
+    }
+
+    private void updateOplusSpatializerParameters() {
+        ContentResolver cr = mAudioService.getContentResolver();
+        if (cr != null) {
+            loadOplusSpatializerSettings(cr);
+            applyOplusSpatializerParameters();
+        }
+    }
+
+    private void applyOplusSpatializerParameters() {
+        if (mSpat == null) {
+            return;
+        }
+        try {
+            byte[] sceneBytes = AudioEffect.intToByteArray(mSpatialAudioScene);
+            byte[] levelBytes = AudioEffect.intToByteArray(mSpatialAudioLevel);
+            mSpat.setParameter(OPLUS_PARAM_SPAT_SCENE, sceneBytes);
+            mSpat.setParameter(OPLUS_PARAM_SPAT_LEVEL, levelBytes);
+            loglogi("applyOplusSpatializerParameters: scene=" + mSpatialAudioScene
+                    + ", level=" + mSpatialAudioLevel);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to apply OPlus spatializer parameters", e);
+        }
+    }
+
+    //------------------------------------------------------
     // vendor parameters
     synchronized void setEffectParameter(int key, @NonNull byte[] value) {
         switch (mState) {
@@ -1654,6 +1739,8 @@ public class SpatializerHelper {
         pw.println("\thas FEATURE_AUDIO_SPATIAL_HEADTRACKING_LOW_LATENCY:"
                 + mAudioService.mContext.getPackageManager().hasSystemFeature(
                 PackageManager.FEATURE_AUDIO_SPATIAL_HEADTRACKING_LOW_LATENCY));
+        pw.println("\tmSpatialAudioScene:" + mSpatialAudioScene + " / mSpatialAudioLevel:"
+                + mSpatialAudioLevel);
     }
 
     private static String spatStateString(int state) {
