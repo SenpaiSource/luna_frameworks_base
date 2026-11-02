@@ -1778,6 +1778,13 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                 slowChange = false;
             }
 
+            // Ensure AOD brightness never drops below calibrated doze brightness floor into black register zone
+            if (Display.isDozeState(state) || mPowerRequest.policy == POLICY_DOZE) {
+                brightnessState = Math.max(brightnessState, mScreenBrightnessDozeConfig);
+                animateValue = Math.max(animateValue, mScreenBrightnessDozeConfig);
+                sdrAnimateValue = Math.max(sdrAnimateValue, mScreenBrightnessDozeConfig);
+            }
+
             final float currentBrightness = mPowerState.getScreenBrightness();
             final float currentSdrBrightness = mPowerState.getSdrScreenBrightness();
 
