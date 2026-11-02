@@ -1818,6 +1818,7 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                     } else {
                         rampSpeed = mBrightnessRampRateFastDecrease;
                     }
+                    setAnimatorRampSpeeds(idle);
                     animateScreenBrightness(animateValue, sdrAnimateValue, rampSpeed);
                 }
             }
