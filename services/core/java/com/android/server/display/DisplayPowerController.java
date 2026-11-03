@@ -479,6 +479,10 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
     // The first autobrightness value set when entering RAMP_STATE_SKIP_INITIAL.
     private float mInitialAutoBrightness;
 
+    // Track pending one-shot post-wake brightness adaptation matching stock
+    private boolean mPendingScreenOnBrightnessSnap;
+    private long mScreenOnTime;
+
     // The controller for the automatic brightness level.
     @Nullable
     private AutomaticBrightnessController mAutomaticBrightnessController;
@@ -1710,6 +1714,8 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                     if (mSkipRampState == RAMP_STATE_SKIP_NONE && mDozing) {
                         mInitialAutoBrightness = brightnessState;
                         mSkipRampState = RAMP_STATE_SKIP_INITIAL;
+                        mPendingScreenOnBrightnessSnap = true;
+                        mScreenOnTime = mClock.uptimeMillis();
                     } else if (mSkipRampState == RAMP_STATE_SKIP_INITIAL
                             && mUseSoftwareAutoBrightnessConfig
                             && !BrightnessSynchronizer.floatEquals(brightnessState,
@@ -1720,10 +1726,11 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                     }
                 } else {
                     mSkipRampState = RAMP_STATE_SKIP_NONE;
+                    mPendingScreenOnBrightnessSnap = false;
                 }
             }
 
-            final boolean initialRampSkip = (state == Display.STATE_ON && mSkipRampState
+            boolean initialRampSkip = (state == Display.STATE_ON && mSkipRampState
                     != RAMP_STATE_SKIP_NONE) || mDisplayPowerProximityStateController
                     .shouldSkipRampBecauseOfProximityChangeToNegative();
             // While dozing, sometimes the brightness is split into buckets. Rather than animating
@@ -1787,6 +1794,15 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
 
             final float currentBrightness = mPowerState.getScreenBrightness();
             final float currentSdrBrightness = mPowerState.getSdrScreenBrightness();
+
+            if (mPendingScreenOnBrightnessSnap) {
+                if (mClock.uptimeMillis() - mScreenOnTime > 2000L) {
+                    mPendingScreenOnBrightnessSnap = false;
+                } else if (mSkipRampState == RAMP_STATE_SKIP_NONE && animateValue > currentBrightness) {
+                    initialRampSkip = true;
+                    mPendingScreenOnBrightnessSnap = false;
+                }
+            }
 
             if (BrightnessUtils.isValidBrightnessValue(animateValue)
                     && (animateValue != currentBrightness

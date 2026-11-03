@@ -468,6 +468,9 @@ public class AutomaticBrightnessController {
         mState = state;
         boolean changed = setBrightnessConfiguration(configuration, shouldResetShortTermModel);
         changed |= setDisplayPolicy(displayPolicy);
+        if (mDisplayState != displayState && displayState == Display.STATE_ON) {
+            mScreenOnBoostEndTime = mClock.uptimeMillis() + SCREEN_ON_BOOST_MILLIS;
+        }
         mDisplayState = displayState;
         mUseNormalBrightnessForDoze = useNormalBrightnessForDoze;
         if (userChangedAutoBrightnessAdjustment) {
@@ -535,6 +538,10 @@ public class AutomaticBrightnessController {
      * matching stock).
      */
     public boolean hasFastRampRate() {
+        return (mClock.uptimeMillis() < mScreenOnBoostEndTime) || mIsLargeBrighten;
+    }
+
+    public boolean isInScreenOnBoost() {
         return (mClock.uptimeMillis() < mScreenOnBoostEndTime);
     }
 
