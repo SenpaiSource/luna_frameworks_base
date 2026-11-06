@@ -1796,7 +1796,7 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
             final float currentSdrBrightness = mPowerState.getSdrScreenBrightness();
 
             if (mPendingScreenOnBrightnessSnap) {
-                if (mClock.uptimeMillis() - mScreenOnTime > 2000L) {
+                if (mClock.uptimeMillis() - mScreenOnTime > 3000L) {
                     mPendingScreenOnBrightnessSnap = false;
                 } else if (mSkipRampState == RAMP_STATE_SKIP_NONE && animateValue > currentBrightness) {
                     initialRampSkip = true;

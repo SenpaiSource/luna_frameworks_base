@@ -470,6 +470,10 @@ public class AutomaticBrightnessController {
         changed |= setDisplayPolicy(displayPolicy);
         if (mDisplayState != displayState && displayState == Display.STATE_ON) {
             mScreenOnBoostEndTime = mClock.uptimeMillis() + SCREEN_ON_BOOST_MILLIS;
+            if (Display.isDozeState(mDisplayState)) {
+                mAmbientLuxValid = false;
+                mAmbientLightRingBuffer.clear();
+            }
         }
         mDisplayState = displayState;
         mUseNormalBrightnessForDoze = useNormalBrightnessForDoze;
@@ -1041,9 +1045,10 @@ public class AutomaticBrightnessController {
 
         // Fast brightening:
         // True large brightening transition outside stock stability envelope
+        final boolean isScreenOnBoost = mClock.uptimeMillis() < mScreenOnBoostEndTime;
         final boolean shouldFastBrighten = isLargeBrighten
                 && mFastAmbientLux >= mAmbientBrighteningThreshold
-                && nextBrightenTransition <= time;
+                && (nextBrightenTransition <= time || isScreenOnBoost);
 
         // Fast darkening:
         // True physical darkness floor (entering a dark room or lights switched off)
