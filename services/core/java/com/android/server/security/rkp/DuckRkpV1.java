@@ -24,6 +24,7 @@ import android.hardware.security.keymint.RpcHardwareInfo;
 import android.os.Build;
 import android.os.ServiceManager;
 import android.os.ServiceSpecificException;
+import android.os.SystemProperties;
 import android.util.Base64;
 
 import java.io.ByteArrayOutputStream;
@@ -45,6 +46,7 @@ import javax.net.ssl.HttpsURLConnection;
 import co.nstant.in.cbor.model.DataItem;
 import co.nstant.in.cbor.model.Map;
 import co.nstant.in.cbor.model.SimpleValue;
+import co.nstant.in.cbor.model.UnicodeString;
 
 final class DuckRkpV1 {
     static final String SERVICE = IRemotelyProvisionedComponent.DESCRIPTOR + "/default";
@@ -118,8 +120,10 @@ final class DuckRkpV1 {
         KeyPair key = generator.generateKeyPair();
         Map publicKey = publicKey((ECPublicKey) key.getPublic());
 
+        String fingerprint = getRegionalFingerprint(Build.FINGERPRINT);
+
         progress.update("fetching");
-        byte[] request = encode(new Map().put(text("fingerprint"), text(Build.FINGERPRINT))
+        byte[] request = encode(new Map().put(text("fingerprint"), text(fingerprint))
                 .put(text("id"), number(42)));
         List<DataItem> eekResponse = array(decode(post(ENDPOINT + ":fetchEekChain", request,
                 false, progress)));
@@ -147,7 +151,7 @@ final class DuckRkpV1 {
             if (eek == null || eek.length > HAL_LIMIT) throw new Failure("missing_eek");
             progress.update("hardware");
             if (backend == 1) {
-                csr = DuckRkpNative.signV1(publicKey, challenge, eek, Build.FINGERPRINT);
+                csr = DuckRkpNative.signV1(publicKey, challenge, eek, fingerprint);
             } else {
                 DeviceInfo deviceInfo = new DeviceInfo();
                 ProtectedData protectedData = new ProtectedData();
@@ -163,7 +167,7 @@ final class DuckRkpV1 {
                     throw new Failure("hal_unavailable");
                 }
                 csr = assemble(publicKey, challenge, tag, deviceInfo.deviceInfo,
-                        protectedData.protectedData, Build.FINGERPRINT);
+                        protectedData.protectedData, fingerprint);
             }
         }
         progress.update("signing");
@@ -203,13 +207,81 @@ final class DuckRkpV1 {
         return mac.doFinal(value);
     }
 
+    static String getRegionalFingerprint(String baseFingerprint) {
+        if (baseFingerprint == null || baseFingerprint.isEmpty()) {
+            return baseFingerprint;
+        }
+
+        String hwRevision = SystemProperties.get("ro.boot.hardware.revision", "");
+        String odmModel = SystemProperties.get("ro.product.odm.model", "");
+        String odmName = SystemProperties.get("ro.product.odm.name", "");
+
+        if ("EU".equalsIgnoreCase(hwRevision) || "CPH2663".equalsIgnoreCase(odmModel)
+                || "CPH2581".equalsIgnoreCase(odmModel)) {
+            if (baseFingerprint.contains("CPH2661IN")) {
+                return baseFingerprint.replace("CPH2661IN", "CPH2663EEA");
+            } else if (baseFingerprint.contains("CPH2661")) {
+                return baseFingerprint.replace("CPH2661", "CPH2663EEA");
+            } else if (baseFingerprint.contains("CPH2573")) {
+                return baseFingerprint.replace("CPH2573", "CPH2581EEA");
+            }
+        } else if ("ROW".equalsIgnoreCase(hwRevision) || "GLO".equalsIgnoreCase(hwRevision)
+                || ("CPH2663".equalsIgnoreCase(odmModel) && !"CPH2663EEA".equalsIgnoreCase(odmName))) {
+            if (baseFingerprint.contains("CPH2661IN")) {
+                return baseFingerprint.replace("CPH2661IN", "CPH2663");
+            } else if (baseFingerprint.contains("CPH2661")) {
+                return baseFingerprint.replace("CPH2661", "CPH2663");
+            }
+        } else if ("CN".equalsIgnoreCase(hwRevision) || "PJF110".equalsIgnoreCase(odmModel)
+                || "PJD110".equalsIgnoreCase(odmModel)) {
+            if (baseFingerprint.contains("CPH2661IN") || baseFingerprint.contains("CPH2661")) {
+                return "OnePlus/PJF110/OP5CFBL1:16/UKQ1.231108.001/U.40ae559-1bb2f7e-1cc5d04:user/release-keys";
+            } else if (baseFingerprint.contains("CPH2573")) {
+                return baseFingerprint.replace("CPH2573", "PJD110");
+            }
+        }
+        return baseFingerprint;
+    }
+
+    static String matchFingerprintToModel(String fingerprint, String attestedModel) {
+        if (fingerprint == null || attestedModel == null || attestedModel.isEmpty()) {
+            return fingerprint;
+        }
+        if ("CPH2663".equalsIgnoreCase(attestedModel)) {
+            if (fingerprint.contains("CPH2661IN")) {
+                return fingerprint.replace("CPH2661IN", "CPH2663EEA");
+            } else if (fingerprint.contains("CPH2661")) {
+                return fingerprint.replace("CPH2661", "CPH2663EEA");
+            }
+        } else if ("CPH2581".equalsIgnoreCase(attestedModel)) {
+            if (fingerprint.contains("CPH2573")) {
+                return fingerprint.replace("CPH2573", "CPH2581EEA");
+            }
+        } else if ("PJF110".equalsIgnoreCase(attestedModel)) {
+            if (fingerprint.contains("CPH2661IN") || fingerprint.contains("CPH2661")) {
+                return "OnePlus/PJF110/OP5CFBL1:16/UKQ1.231108.001/U.40ae559-1bb2f7e-1cc5d04:user/release-keys";
+            }
+        } else if ("PJD110".equalsIgnoreCase(attestedModel)) {
+            if (fingerprint.contains("CPH2573")) {
+                return fingerprint.replace("CPH2573", "PJD110");
+            }
+        }
+        return fingerprint;
+    }
+
     static byte[] assemble(Map publicKey, byte[] challenge, byte[] tag, byte[] device,
             byte[] encrypted, String fingerprint) throws Exception {
         if (tag == null || tag.length != 32 || device == null || encrypted == null
                 || device.length > HAL_LIMIT || encrypted.length > HAL_LIMIT) {
             throw new Failure("invalid_hal_response");
         }
-        if (map(decode(device)).getKeys().isEmpty()) throw new Failure("invalid_hal_response");
+        Map deviceMap = map(decode(device));
+        if (deviceMap.getKeys().isEmpty()) throw new Failure("invalid_hal_response");
+
+        DataItem modelItem = deviceMap.get(text("model"));
+        if (modelItem instanceof UnicodeString) {
+            fingerprint = matchFingerprintToModel(fingerprint, ((UnicodeString) modelItem).getString());
+        }
         List<DataItem> cose = array(decode(encrypted));
         if (cose.size() != 4
                 || integer(map(decode(bytes(cose.get(0)))).get(number(1))) != 3
