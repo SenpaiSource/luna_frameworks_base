@@ -549,7 +549,7 @@ public class AutomaticBrightnessController {
      * matching stock).
      */
     public boolean hasFastRampRate() {
-        return (mClock.uptimeMillis() < mScreenOnBoostEndTime) || mIsLargeBrighten;
+        return isInScreenOnBoost();
     }
 
     public boolean isInScreenOnBoost() {
