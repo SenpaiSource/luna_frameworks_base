@@ -224,6 +224,19 @@ public class AutomaticBrightnessController {
     // A ring buffer containing all of the recent ambient light sensor readings.
     private AmbientLightRingBuffer mAmbientLightRingBuffer;
 
+    // Screen-on boost mode and stock StabilityProcess tracking
+    private static final long SCREEN_ON_BOOST_MILLIS = 5000L;
+    private static final long SMALL_CHANGE_FORCE_WINDOW_MILLIS = 4000L;
+    private static final float ACCELERATE_UP_WEIGHT = 1.5f;
+    private static final int ACCELERATE_UP_OFFSET = 1;
+    private static final float ACCELERATE_DOWN_WEIGHT = 1.08f;
+    private static final int ACCELERATE_DOWN_OFFSET = 3;
+    private static final float ACCELERATE_SCALE_MIN = 1.0f;
+    private static final float ACCELERATE_SCALE_MAX = 3.333f;
+    private static final int ACCELERATE_COUNT_MAX = 10;
+    private long mScreenOnBoostEndTime;
+    private boolean mIsLargeBrighten;
+    private float mAccelerateScale = 1.0f;
     // The handler
     private AutomaticBrightnessHandler mHandler;
 
@@ -462,6 +475,13 @@ public class AutomaticBrightnessController {
         mState = state;
         boolean changed = setBrightnessConfiguration(configuration, shouldResetShortTermModel);
         changed |= setDisplayPolicy(displayPolicy);
+        if (mDisplayState != displayState && displayState == Display.STATE_ON) {
+            mScreenOnBoostEndTime = mClock.uptimeMillis() + SCREEN_ON_BOOST_MILLIS;
+            if (Display.isDozeState(mDisplayState)) {
+                mAmbientLuxValid = false;
+                mAmbientLightRingBuffer.clear();
+            }
+        }
         mDisplayState = displayState;
         mUseNormalBrightnessForDoze = useNormalBrightnessForDoze;
         if (userChangedAutoBrightnessAdjustment) {
@@ -524,6 +544,21 @@ public class AutomaticBrightnessController {
         return mAmbientLux;
     }
 
+    /**
+     * Returns true if brightness ramps should use the fast rate (e.g. screen on boost
+     * matching stock).
+     */
+    public boolean hasFastRampRate() {
+        return (mClock.uptimeMillis() < mScreenOnBoostEndTime) || mIsLargeBrighten;
+    }
+
+    public boolean isInScreenOnBoost() {
+        return (mClock.uptimeMillis() < mScreenOnBoostEndTime);
+    }
+
+    public float getAccelerateScale() {
+        return mAccelerateScale;
+    }
     float getSlowAmbientLux() {
         return mSlowAmbientLux;
     }
@@ -723,6 +758,8 @@ public class AutomaticBrightnessController {
             if (!mLightSensorEnabled) {
                 mLightSensorEnabled = true;
                 mLightSensorEnableTime = mClock.uptimeMillis();
+                mScreenOnBoostEndTime = mLightSensorEnableTime + SCREEN_ON_BOOST_MILLIS;
+                mIsLargeBrighten = false;
                 mCurrentLightSensorRate = mInitialLightSensorRate;
                 registerForegroundAppUpdater();
                 mSensorManager.registerListener(mLightSensorListener, mLightSensor,
@@ -731,6 +768,9 @@ public class AutomaticBrightnessController {
             }
         } else if (mLightSensorEnabled) {
             mLightSensorEnabled = false;
+            mScreenOnBoostEndTime = 0;
+            mIsLargeBrighten = false;
+            mAccelerateScale = 1.0f;
             mAmbientLuxValid = !mResetAmbientLuxAfterWarmUpConfig;
             if (!mAmbientLuxValid) {
                 mPreThresholdLux = PowerManager.BRIGHTNESS_INVALID_FLOAT;
@@ -879,7 +919,7 @@ public class AutomaticBrightnessController {
         return x * (x * 0.5f + mWeightingIntercept);
     }
 
-    private long nextAmbientLightBrighteningTransition(long time) {
+    private long nextAmbientLightBrighteningTransition(long time, float accelerateScale) {
         final int N = mAmbientLightRingBuffer.size();
         long earliestValidTime = time;
         for (int i = N - 1; i >= 0; i--) {
@@ -888,21 +928,257 @@ public class AutomaticBrightnessController {
             }
             earliestValidTime = mAmbientLightRingBuffer.getTime(i);
         }
-        return earliestValidTime + (isInIdleMode()
-                ? mBrighteningLightDebounceConfigIdle : mBrighteningLightDebounceConfig);
+        final long debounce = isInIdleMode()
+                ? mBrighteningLightDebounceConfigIdle : mBrighteningLightDebounceConfig;
+        return earliestValidTime + (long) (debounce / Math.max(1.0f, accelerateScale));
     }
 
-    private long nextAmbientLightDarkeningTransition(long time) {
+    private long nextAmbientLightDarkeningTransition(long time, float accelerateScale) {
         final int N = mAmbientLightRingBuffer.size();
         long earliestValidTime = time;
+        int noiseCount = 0;
         for (int i = N - 1; i >= 0; i--) {
             if (mAmbientLightRingBuffer.getLux(i) >= mAmbientDarkeningThreshold) {
-                break;
+                // Stock LuxQueueProcess noise tolerance: tolerate a single optical reflection
+                // or sensor noise fluctuation without resetting the darkening debounce window.
+                if (noiseCount > 0) {
+                    break;
+                }
+                noiseCount++;
+                continue;
             }
             earliestValidTime = mAmbientLightRingBuffer.getTime(i);
         }
-        return earliestValidTime + (isInIdleMode()
-                ? mDarkeningLightDebounceConfigIdle : mDarkeningLightDebounceConfig);
+        final long debounce = isInIdleMode()
+                ? mDarkeningLightDebounceConfigIdle : mDarkeningLightDebounceConfig;
+        return earliestValidTime + (long) (debounce / Math.max(1.0f, accelerateScale));
+    }
+
+    // Stock StabilityProcess large-change region nodes and piecewise linear coefficients
+    private static final float[] LARGE_CHANGE_LEFT_NODES = {30.0f, 300.0f, 1080.0f, 500000.0f};
+    private static final float[] LARGE_CHANGE_LEFT_COEFFS = {4.0f, 6.0f, 1.6f, 2.0f};
+    private static final float[] LARGE_CHANGE_LEFT_CONSTS = {0.0f, 2.5f, -135.0f, 0.0f};
+
+    private static final float[] LARGE_CHANGE_RIGHT_NODES = {20.0f, 35.0f, 500.0f, 500000.0f};
+    private static final float[] LARGE_CHANGE_RIGHT_COEFFS = {2.5f, 10.0f, 2.0f, 1.5f};
+    private static final float[] LARGE_CHANGE_RIGHT_CONSTS = {0.0f, -150.0f, 130.0f, 380.0f};
+
+    // Stock StabilityProcess small-change region thresholds and percentages (under-screen ALS)
+    private static final float[] SMALL_CHANGE_LUX_THRESHOLDS = {
+            2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 15.0f, 20.0f, 5000.0f};
+    private static final float[] SMALL_CHANGE_PERCENT_LEFT = {
+            0.2853f, 0.2778f, 0.2593f, 0.25f, 0.2444f, 0.1926f, 0.1778f, 0.125f, 0.2f};
+    private static final float[] SMALL_CHANGE_PERCENT_RIGHT = {
+            0.3138f, 0.2778f, 0.2593f, 0.25f, 0.2444f, 0.1926f, 0.1778f, 0.125f, 0.2f};
+    private static final float[] SMALL_CHANGE_SPECIAL_THRESHOLDS = {20.0f, 25.0f, 30.0f, 40.0f};
+    private static final float[] SMALL_CHANGE_SPECIAL_LEFT = {0.1066f, 0.0842f, 0.0896f};
+    private static final float[] SMALL_CHANGE_SPECIAL_RIGHT = {0.1429f, 0.1656f, 0.1603f};
+
+    // Minimum ambient lux required to accept a brightening transition (under-screen sensor floor)
+    private static final float STABLE_RIGHT_MIN_LUX = 7.01f;
+    private static final float STABLE_SMALL_RIGHT_MIN_LUX = 4.2f;
+
+    private static float getLargeChangeValueLeft(float currentLux) {
+        if (currentLux <= 0.0f) {
+            return 0.0f;
+        }
+        for (int i = 0; i < LARGE_CHANGE_LEFT_NODES.length; i++) {
+            if (currentLux <= LARGE_CHANGE_LEFT_NODES[i]) {
+                float val = (currentLux / LARGE_CHANGE_LEFT_COEFFS[i]) + LARGE_CHANGE_LEFT_CONSTS[i];
+                return Math.max(0.0f, val);
+            }
+        }
+        return 0.0f;
+    }
+
+    private static float getLargeChangeValueRight(float currentLux) {
+        for (int i = 0; i < LARGE_CHANGE_RIGHT_NODES.length; i++) {
+            if (currentLux <= LARGE_CHANGE_RIGHT_NODES[i]) {
+                float val = (LARGE_CHANGE_RIGHT_COEFFS[i] * currentLux) + LARGE_CHANGE_RIGHT_CONSTS[i];
+                val = Math.min(val, currentLux + 2000.0f);
+                return Math.max(STABLE_RIGHT_MIN_LUX, val);
+            }
+        }
+        return currentLux + 2000.0f;
+    }
+
+    private static float getSmallChangeValueLeft(float largeLeft, float largeRight, float curLux) {
+        float largeSpan = largeRight - largeLeft;
+        float pct = SMALL_CHANGE_PERCENT_LEFT[SMALL_CHANGE_PERCENT_LEFT.length - 1];
+        for (int i = 0; i < SMALL_CHANGE_LUX_THRESHOLDS.length; i++) {
+            if (curLux <= SMALL_CHANGE_LUX_THRESHOLDS[i]) {
+                pct = SMALL_CHANGE_PERCENT_LEFT[i];
+                break;
+            }
+        }
+        float smallLeft = curLux - (pct * largeSpan);
+        if (curLux > SMALL_CHANGE_SPECIAL_THRESHOLDS[0]
+                && curLux <= SMALL_CHANGE_SPECIAL_THRESHOLDS[1]) {
+            smallLeft = curLux - (SMALL_CHANGE_SPECIAL_LEFT[0] * largeSpan);
+        } else if (curLux > SMALL_CHANGE_SPECIAL_THRESHOLDS[1]
+                && curLux <= SMALL_CHANGE_SPECIAL_THRESHOLDS[2]) {
+            smallLeft = curLux - (SMALL_CHANGE_SPECIAL_LEFT[1] * largeSpan);
+        } else if (curLux > SMALL_CHANGE_SPECIAL_THRESHOLDS[2]
+                && curLux <= SMALL_CHANGE_SPECIAL_THRESHOLDS[3]) {
+            smallLeft = curLux - (SMALL_CHANGE_SPECIAL_LEFT[2] * largeSpan);
+        }
+        return Math.max(smallLeft, largeLeft);
+    }
+
+    private static float getSmallChangeValueRight(float largeLeft, float largeRight, float curLux) {
+        float largeSpan = largeRight - largeLeft;
+        float pct = SMALL_CHANGE_PERCENT_RIGHT[SMALL_CHANGE_PERCENT_RIGHT.length - 1];
+        for (int i = 0; i < SMALL_CHANGE_LUX_THRESHOLDS.length; i++) {
+            if (curLux <= SMALL_CHANGE_LUX_THRESHOLDS[i]) {
+                pct = SMALL_CHANGE_PERCENT_RIGHT[i];
+                break;
+            }
+        }
+        float smallRight = curLux + (pct * largeSpan);
+        if (curLux > SMALL_CHANGE_SPECIAL_THRESHOLDS[0]
+                && curLux <= SMALL_CHANGE_SPECIAL_THRESHOLDS[1]) {
+            smallRight = curLux + (SMALL_CHANGE_SPECIAL_RIGHT[0] * largeSpan);
+        } else if (curLux > SMALL_CHANGE_SPECIAL_THRESHOLDS[1]
+                && curLux <= SMALL_CHANGE_SPECIAL_THRESHOLDS[2]) {
+            smallRight = curLux + (SMALL_CHANGE_SPECIAL_RIGHT[1] * largeSpan);
+        } else if (curLux > SMALL_CHANGE_SPECIAL_THRESHOLDS[2]
+                && curLux <= SMALL_CHANGE_SPECIAL_THRESHOLDS[3]) {
+            smallRight = curLux + (SMALL_CHANGE_SPECIAL_RIGHT[2] * largeSpan);
+        }
+        smallRight = Math.max(STABLE_SMALL_RIGHT_MIN_LUX, smallRight);
+        return Math.min(smallRight, largeRight);
+    }
+
+    /**
+     * Stock LuxDataProcess.findWeightingValue: exponential moving average (w = 0.5) over the
+     * ring buffer samples within [now - horizon, now], rounded to 2 decimal places.
+     */
+    private float calculateStockWeightedLux(long now, long horizon) {
+        final int N = mAmbientLightRingBuffer.size();
+        if (N == 0) {
+            return -1.0f;
+        }
+        final long horizonStart = now - horizon;
+        float weighted = Float.NaN;
+        for (int i = 0; i < N; i++) {
+            if (mAmbientLightRingBuffer.getTime(i) < horizonStart && i < N - 1) {
+                continue;
+            }
+            float sample = mAmbientLightRingBuffer.getLux(i);
+            if (Float.isNaN(weighted)) {
+                weighted = sample;
+            } else {
+                weighted = 0.5f * sample + 0.5f * weighted;
+            }
+        }
+        if (!Float.isFinite(weighted)) {
+            return calculateAmbientLux(now, horizon);
+        }
+        return Math.round(weighted * 100.0f) / 100.0f;
+    }
+
+    /**
+     * Stock LuxQueueProcess.getTrendList: checks that recent samples over trendWindowMs form a
+     * monotonic trend relative to referenceLux (tolerating at most 1 noise sample) and rejects
+     * non-converging bounces.
+     */
+    private boolean hasMonotonicTrend(long now, long trendWindowMs, float referenceLux,
+            boolean isUp) {
+        final int N = mAmbientLightRingBuffer.size();
+        if (N == 0) {
+            return false;
+        }
+        final long windowStart = now - trendWindowMs;
+        final int direction = isUp ? 1 : -1;
+        int noiseCount = 0;
+        int trendSamples = 0;
+        float avg = Float.NaN;
+        for (int i = N - 1; i >= 0; i--) {
+            long sampleTime = mAmbientLightRingBuffer.getTime(i);
+            if (sampleTime < windowStart && trendSamples > 0) {
+                break;
+            }
+            float lux = mAmbientLightRingBuffer.getLux(i);
+            if (Float.isNaN(lux)) {
+                return false;
+            }
+            int cmp = Float.compare(lux, referenceLux);
+            if (cmp != direction) {
+                if (noiseCount <= 0) {
+                    noiseCount++;
+                    continue;
+                }
+                return false;
+            }
+            trendSamples++;
+            if (!Float.isNaN(avg)) {
+                if (isUp && lux * 2.0f < avg
+                        && Math.abs(lux - referenceLux) * 2.0f < Math.abs(avg - referenceLux)) {
+                    return false;
+                }
+                if (!isUp && avg * 2.0f < lux
+                        && Math.abs(lux - referenceLux) * 2.0f > Math.abs(avg - referenceLux)) {
+                    return false;
+                }
+                avg = 0.5f * lux + 0.5f * avg;
+            } else {
+                avg = lux;
+            }
+        }
+        return trendSamples > 0;
+    }
+
+    /**
+     * Stock StabilityProcess.Accelerator: computes [1.0, 3.333] reaction/animation speed
+     * multiplier from the number of large-change envelopes crossed.
+     */
+    private static int calculateAccelerateCount(boolean isUp, float currentLux, float verifyLux,
+            int count) {
+        float limitLux = isUp ? getLargeChangeValueRight(currentLux)
+                : getLargeChangeValueLeft(currentLux);
+        boolean isOverRange = isUp ? (verifyLux > limitLux) : (verifyLux < limitLux);
+        if (count >= ACCELERATE_COUNT_MAX || (currentLux < 1.0f && !isUp) || !isOverRange) {
+            return count;
+        }
+        return calculateAccelerateCount(isUp, limitLux, verifyLux, count + 1);
+    }
+
+    private static float computeAccelerateScale(float currentLux, float verifyLux) {
+        if (Float.isNaN(currentLux) || Float.isNaN(verifyLux) || currentLux == verifyLux) {
+            return ACCELERATE_SCALE_MIN;
+        }
+        boolean isUp = verifyLux > currentLux;
+        int count = calculateAccelerateCount(isUp, currentLux, verifyLux, 0);
+        float scale = isUp
+                ? Math.max(ACCELERATE_SCALE_MIN,
+                        ACCELERATE_UP_WEIGHT * Math.max(0, count - ACCELERATE_UP_OFFSET))
+                : Math.max(ACCELERATE_SCALE_MIN,
+                        ACCELERATE_DOWN_WEIGHT * Math.max(0, count - ACCELERATE_DOWN_OFFSET));
+        return MathUtils.constrain(scale, ACCELERATE_SCALE_MIN, ACCELERATE_SCALE_MAX);
+    }
+
+    private boolean isAllOutOfSmallRange(long now, float smallLeft, float smallRight) {
+        final int N = mAmbientLightRingBuffer.size();
+        if (N == 0) {
+            return false;
+        }
+        final long windowStart = now - SMALL_CHANGE_FORCE_WINDOW_MILLIS;
+        int count = 0;
+        for (int i = N - 1; i >= 0; i--) {
+            if (mAmbientLightRingBuffer.getTime(i) < windowStart) {
+                break;
+            }
+            float lux = mAmbientLightRingBuffer.getLux(i);
+            count++;
+            if (lux > smallLeft && lux < smallRight) {
+                return false;
+            }
+        }
+        if (count > 0) {
+            return true;
+        }
+        float latestLux = mAmbientLightRingBuffer.getLux(N - 1);
+        return latestLux <= smallLeft || latestLux >= smallRight;
     }
 
     private void updateAmbientLux() {
@@ -927,7 +1203,18 @@ public class AutomaticBrightnessController {
                         timeWhenSensorWarmedUp);
                 return;
             }
-            setAmbientLux(calculateAmbientLux(time, mAmbientLightHorizonShort));
+            float initLux = calculateStockWeightedLux(time, mAmbientLightHorizonShort);
+            if (initLux < 0) {
+                if (mLoggingEnabled) {
+                    Slog.d(TAG, "updateAmbientLux: No ambient light readings available yet");
+                }
+                return;
+            }
+            if (initLux <= 2.0f) {
+                initLux = 0.0f;
+            }
+            mAccelerateScale = 1.0f;
+            setAmbientLux(initLux);
             mAmbientLuxValid = true;
             if (mLoggingEnabled) {
                 Slog.d(TAG, "updateAmbientLux: Initializing: " +
@@ -937,38 +1224,87 @@ public class AutomaticBrightnessController {
             updateAutoBrightness(true /* sendUpdate */, false /* isManuallySet */);
         }
 
-        long nextBrightenTransition = nextAmbientLightBrighteningTransition(time);
-        long nextDarkenTransition = nextAmbientLightDarkeningTransition(time);
-        // Essentially, we calculate both a slow ambient lux, to ensure there's a true long-term
-        // change in lighting conditions, and a fast ambient lux to determine what the new
-        // brightness situation is since the slow lux can be quite slow to converge.
-        //
-        // Note that both values need to be checked for sufficient change before updating the
-        // proposed ambient light value since the slow value might be sufficiently far enough away
-        // from the fast value to cause a recalculation while its actually just converging on
-        // the fast value still.
-        mSlowAmbientLux = calculateAmbientLux(time, mAmbientLightHorizonLong);
-        mFastAmbientLux = calculateAmbientLux(time, mAmbientLightHorizonShort);
+        mSlowAmbientLux = calculateStockWeightedLux(time, mAmbientLightHorizonLong);
+        mFastAmbientLux = calculateStockWeightedLux(time, mAmbientLightHorizonShort);
+        final float accelerateScale = computeAccelerateScale(mAmbientLux, mFastAmbientLux);
+        mAccelerateScale = accelerateScale;
 
-        if ((mSlowAmbientLux >= mAmbientBrighteningThreshold
+        long nextBrightenTransition = nextAmbientLightBrighteningTransition(time, accelerateScale);
+        long nextDarkenTransition = nextAmbientLightDarkeningTransition(time, accelerateScale);
+
+        // Stock StabilityProcess LargeChange & SmallChange evaluation
+        final float largeLeft = getLargeChangeValueLeft(mAmbientLux);
+        final float largeRight = getLargeChangeValueRight(mAmbientLux);
+        final float smallLeft = getSmallChangeValueLeft(largeLeft, largeRight, mAmbientLux);
+        final float smallRight = getSmallChangeValueRight(largeLeft, largeRight, mAmbientLux);
+
+        final boolean isLargeDarken = mFastAmbientLux <= largeLeft;
+        final boolean isLargeBrighten = mFastAmbientLux >= largeRight;
+        mIsLargeBrighten = isLargeBrighten;
+
+        final boolean isScreenOnBoost = mClock.uptimeMillis() < mScreenOnBoostEndTime;
+        final long brightenTrendWindow = Math.max(200L, (long) (800L / accelerateScale));
+        final long darkenTrendWindow = Math.max(400L, (long) (1200L / accelerateScale));
+
+        final boolean shouldFastBrighten = isLargeBrighten
                 && mFastAmbientLux >= mAmbientBrighteningThreshold
-                && nextBrightenTransition <= time)
-                || (mSlowAmbientLux <= mAmbientDarkeningThreshold
-                        && mFastAmbientLux <= mAmbientDarkeningThreshold
-                        && nextDarkenTransition <= time)) {
+                && (nextBrightenTransition <= time || isScreenOnBoost)
+                && (isScreenOnBoost || hasMonotonicTrend(time, brightenTrendWindow, mAmbientLux, true));
+
+        final boolean shouldFastDarken = isLargeDarken
+                && mFastAmbientLux <= mAmbientDarkeningThreshold
+                && nextDarkenTransition <= time
+                && hasMonotonicTrend(time, darkenTrendWindow, mAmbientLux, false);
+
+        final boolean isStableDarken = mSlowAmbientLux <= smallLeft
+                && mFastAmbientLux <= smallLeft
+                && mSlowAmbientLux <= mAmbientDarkeningThreshold
+                && mFastAmbientLux <= mAmbientDarkeningThreshold
+                && nextDarkenTransition <= time
+                && isAllOutOfSmallRange(time, smallLeft, smallRight);
+
+        final boolean isStableBrighten = mSlowAmbientLux >= smallRight
+                && mFastAmbientLux >= smallRight
+                && mSlowAmbientLux >= mAmbientBrighteningThreshold
+                && mFastAmbientLux >= mAmbientBrighteningThreshold
+                && nextBrightenTransition <= time
+                && isAllOutOfSmallRange(time, smallLeft, smallRight);
+
+        final boolean isDarkening = shouldFastDarken || isStableDarken;
+        final boolean isBrightening = shouldFastBrighten || isStableBrighten;
+
+        if (isDarkening) {
             mPreThresholdLux = mAmbientLux;
-            setAmbientLux(mFastAmbientLux);
+            float targetLux = shouldFastDarken ? mFastAmbientLux : mSlowAmbientLux;
+            // Clamp sub-floor noise (<= 2.0 lux) to 0.0f only after full darkening stability passes.
+            if (targetLux <= 2.0f) {
+                targetLux = 0.0f;
+            }
+            setAmbientLux(targetLux);
             if (mLoggingEnabled) {
-                Slog.d(TAG, "updateAmbientLux: "
-                        + ((mFastAmbientLux > mPreThresholdLux) ? "Brightened" : "Darkened") + ": "
+                Slog.d(TAG, "updateAmbientLux: Darkened: "
                         + "mAmbientBrighteningThreshold=" + mAmbientBrighteningThreshold + ", "
                         + "mAmbientDarkeningThreshold=" + mAmbientDarkeningThreshold + ", "
                         + "mAmbientLightRingBuffer=" + mAmbientLightRingBuffer + ", "
                         + "mAmbientLux=" + mAmbientLux);
             }
             updateAutoBrightness(true /* sendUpdate */, false /* isManuallySet */);
-            nextBrightenTransition = nextAmbientLightBrighteningTransition(time);
-            nextDarkenTransition = nextAmbientLightDarkeningTransition(time);
+            nextBrightenTransition = nextAmbientLightBrighteningTransition(time, accelerateScale);
+            nextDarkenTransition = nextAmbientLightDarkeningTransition(time, accelerateScale);
+        } else if (isBrightening) {
+            mPreThresholdLux = mAmbientLux;
+            float targetLux = shouldFastBrighten ? mFastAmbientLux : mSlowAmbientLux;
+            setAmbientLux(targetLux);
+            if (mLoggingEnabled) {
+                Slog.d(TAG, "updateAmbientLux: Brightened: "
+                        + "mAmbientBrighteningThreshold=" + mAmbientBrighteningThreshold + ", "
+                        + "mAmbientDarkeningThreshold=" + mAmbientDarkeningThreshold + ", "
+                        + "mAmbientLightRingBuffer=" + mAmbientLightRingBuffer + ", "
+                        + "mAmbientLux=" + mAmbientLux);
+            }
+            updateAutoBrightness(true /* sendUpdate */, false /* isManuallySet */);
+            nextBrightenTransition = nextAmbientLightBrighteningTransition(time, accelerateScale);
+            nextDarkenTransition = nextAmbientLightDarkeningTransition(time, accelerateScale);
         }
         long nextTransitionTime = Math.min(nextDarkenTransition, nextBrightenTransition);
         // If one of the transitions is ready to occur, but the total weighted ambient lux doesn't
@@ -1620,6 +1956,36 @@ public class AutomaticBrightnessController {
             mStart = 0;
             mEnd = 0;
             mCount = 0;
+        }
+
+        public boolean isMonotonicIncreasing(int count) {
+            if (mCount < count || count <= 1) {
+                return false;
+            }
+            float lastLux = getLux(mCount - count);
+            for (int i = mCount - count + 1; i < mCount; i++) {
+                float currentLux = getLux(i);
+                if (currentLux < lastLux) {
+                    return false;
+                }
+                lastLux = currentLux;
+            }
+            return getLux(mCount - 1) > getLux(mCount - count);
+        }
+
+        public boolean isMonotonicDecreasing(int count) {
+            if (mCount < count || count <= 1) {
+                return false;
+            }
+            float lastLux = getLux(mCount - count);
+            for (int i = mCount - count + 1; i < mCount; i++) {
+                float currentLux = getLux(i);
+                if (currentLux > lastLux) {
+                    return false;
+                }
+                lastLux = currentLux;
+            }
+            return getLux(mCount - 1) < getLux(mCount - count);
         }
 
         @Override

@@ -17,14 +17,15 @@
 package com.android.server.display;
 
 import android.animation.ValueAnimator;
+import android.os.SystemClock;
 import android.util.FloatProperty;
+import android.util.MathUtils;
 import android.view.Choreographer;
 
 import com.android.internal.display.BrightnessUtils;
 
 /**
  * A custom animator that progressively updates a property value at
- * a given variable rate until it reaches a particular target value.
  * The ramping at the given rate is done in the perceptual space using
  * the HLG transfer functions.
  */
@@ -51,6 +52,28 @@ class RampAnimator<T> {
 
     private boolean mFirstTime = true;
 
+    // Stock AnimationStepper state (nit-space geometric/exponential transitions)
+    public interface NitConverter {
+        float convertToNits(float brightness);
+        float getBrightnessFromNits(float nits);
+    }
+
+    private static final float[] SEQ_ANIMATION_REGION = {15.0f, 50.0f, 100.0f};
+    private static final float[] SEQ_ANIMATION_WEIGHT = {0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
+    private static final float[] BRIGHTNESS_REGION_SLOPE = {
+            0.55f, 0.75f, 0.85f, 1.0f, 1.2f, 2.0f, 2.5f, 3.0f, 4.0f};
+    private static final long SHORT_TERM_INTERRUPT_MILLIS = 40000L;
+    private static final float UPDATE_AUTO_ANI_GAP_NITS = 0.3f;
+
+    private NitConverter mNitConverter;
+    private boolean mUseAutoStepper;
+    private float mAccelerateScale = 1.0f;
+    private boolean mIsUpForAnimation;
+    private float mStartForAnimation;
+    private float mStopForAnimation;
+    private float mStepperAccelerateScale = 1.0f;
+    private long mLastAutoAnimUpdateMs;
+    private int mParameterSeqForAnimation = -1;
     RampAnimator(T object, FloatProperty<T> property) {
         this(object, property, System::nanoTime);
     }
@@ -85,14 +108,23 @@ class RampAnimator<T> {
      *                              animation speed
      * @return True if the target differs from the previous target.
      */
+    void setNitConverter(NitConverter converter) {
+        mNitConverter = converter;
+    }
+
+    void setAutoStepperParams(boolean useAutoStepper, float accelerateScale) {
+        mUseAutoStepper = useAutoStepper;
+        mAccelerateScale = Math.max(1.0f, accelerateScale);
+    }
+
     boolean setAnimationTarget(float targetLinear, float rate, boolean ignoreAnimationLimits) {
         float maxIncreaseTimeSecs = ignoreAnimationLimits ? 0 : mAnimationIncreaseMaxTimeSecs;
         float maxDecreaseTimeSecs = ignoreAnimationLimits ? 0 : mAnimationDecreaseMaxTimeSecs;
         return setAnimationTarget(targetLinear, rate, maxIncreaseTimeSecs, maxDecreaseTimeSecs);
     }
+
     private boolean setAnimationTarget(float targetLinear, float rate,
             float maxIncreaseTimeSecs, float maxDecreaseTimeSecs) {
-        // Convert the target from the linear into the HLG space.
         final float target = BrightnessUtils.convertLinearToGamma(targetLinear);
 
         // Immediately jump to the target the first time.
@@ -137,6 +169,15 @@ class RampAnimator<T> {
         mTargetHlgValue = target;
         mTargetLinearValue = targetLinear;
 
+        if (changed && mUseAutoStepper && mNitConverter != null) {
+            float currLinear = BrightnessUtils.convertGammaToLinear(mCurrentValue);
+            float currNit = mNitConverter.convertToNits(currLinear);
+            float targetNit = mNitConverter.convertToNits(targetLinear);
+            if (currNit > 0.0f && targetNit > 0.0f) {
+                updateAutoAnimationParameter(targetNit, currNit);
+            }
+        }
+
         // Start animating.
         if (!mAnimating && target != mCurrentValue) {
             mAnimating = true;
@@ -167,6 +208,249 @@ class RampAnimator<T> {
         mProperty.setValue(mObject, linearVal);
     }
 
+    private static int getCalculateParameterSeqForAnimation(boolean isUp, float start, float stop) {
+        if (isUp) {
+            if (start < SEQ_ANIMATION_REGION[0]) {
+                if (stop < SEQ_ANIMATION_REGION[0]) {
+                    return 0;
+                } else if (stop < SEQ_ANIMATION_REGION[1]) {
+                    return 1;
+                } else {
+                    return 2;
+                }
+            } else if (stop < SEQ_ANIMATION_REGION[1]) {
+                return 3;
+            } else {
+                return 4;
+            }
+        } else {
+            if (start > SEQ_ANIMATION_REGION[2]) {
+                return (stop > SEQ_ANIMATION_REGION[0]) ? 5 : 6;
+            } else if (start <= SEQ_ANIMATION_REGION[0]) {
+                return 9;
+            } else {
+                return (stop > SEQ_ANIMATION_REGION[0]) ? 7 : 8;
+            }
+        }
+    }
+
+    private void updateAutoAnimationParameter(float targetNit, float currentNit) {
+        if (Math.abs(targetNit - mStopForAnimation) > UPDATE_AUTO_ANI_GAP_NITS) {
+            long now = SystemClock.uptimeMillis();
+            boolean directionResult = targetNit > currentNit;
+            float currentResult = currentNit;
+            float accelerateScaleResult = mAccelerateScale;
+            if (Math.abs(currentNit - mStopForAnimation) > 1e-6f && mStopForAnimation > 0.0f) {
+                boolean isSameDirection = (directionResult == mIsUpForAnimation);
+                boolean isShortTermChange = (now - mLastAutoAnimUpdateMs) < SHORT_TERM_INTERRUPT_MILLIS;
+                if (isSameDirection && isShortTermChange) {
+                    currentResult = mStartForAnimation;
+                    accelerateScaleResult = mStepperAccelerateScale;
+                }
+            }
+            mIsUpForAnimation = directionResult;
+            mStartForAnimation = currentResult;
+            mStopForAnimation = targetNit;
+            mStepperAccelerateScale = accelerateScaleResult;
+            mLastAutoAnimUpdateMs = now;
+            mParameterSeqForAnimation = getCalculateParameterSeqForAnimation(
+                    mIsUpForAnimation, mStartForAnimation, mStopForAnimation);
+        }
+    }
+
+    private static float calculateChangeGapNit(boolean isUp, float currY, float start, float stop,
+            float slope, float adjfreq, int type, float accelerateScale) {
+        if (isUp) {
+            if (type == 1) {
+                float safeStart = Math.max(start, 0.1f);
+                float safeCurr = Math.max(currY, 0.1f);
+                float denom = Math.max(1.0f, (adjfreq * slope) / accelerateScale);
+                float target = (float) (safeCurr * Math.pow(stop / safeStart, 1.0f / denom));
+                return Math.abs(target - currY);
+            } else if (type == 2) {
+                float offset = 0.8f * start;
+                float safeStart = Math.max(start - offset, 0.1f);
+                float denom = Math.max(1.0f, (adjfreq * slope) / accelerateScale);
+                double percent = Math.pow(Math.max(stop - offset, 0.1f) / safeStart, 1.0f / denom);
+                float target = (float) (((currY - offset) * percent) + offset);
+                return Math.abs(target - currY);
+            }
+        } else {
+            if (type == 1) {
+                float target = currY * slope;
+                return Math.abs(target - currY);
+            } else if (type == 2) {
+                float offset = 0.92f * stop;
+                float target = ((currY - offset) * slope) + offset;
+                return Math.abs(target - currY);
+            }
+        }
+        return -1.0f;
+    }
+
+    private float calcStockAutoStepperNextLinear(float currLinear, float targetLinear,
+            float timeDelta) {
+        if (mNitConverter == null || timeDelta <= 0.0f) {
+            return Float.NaN;
+        }
+        float currY = mNitConverter.convertToNits(currLinear);
+        float targetY = mNitConverter.convertToNits(targetLinear);
+        if (currY <= 0.0f || targetY <= 0.0f || Float.isNaN(currY) || Float.isNaN(targetY)) {
+            return Float.NaN;
+        }
+        if (mParameterSeqForAnimation < 0) {
+            updateAutoAnimationParameter(targetY, currY);
+        }
+        float adjfreq = MathUtils.constrain(1.0f / timeDelta, 10.0f, 240.0f);
+        float accel = Math.max(1.0f, mStepperAccelerateScale);
+        float startY = mStartForAnimation > 0.0f ? mStartForAnimation : currY;
+        float stopY = mStopForAnimation > 0.0f ? mStopForAnimation : targetY;
+        int seq = mParameterSeqForAnimation;
+        float deltaNit = -1.0f;
+
+        if (targetY < currY && currY < 3.0f && targetY < 3.0f) {
+            float slope = (float) Math.pow(0.98f, 1.0f / (adjfreq / accel));
+            deltaNit = calculateChangeGapNit(false, currY, startY, stopY, slope, adjfreq, 1, accel);
+        } else if (targetY < currY && currY < 10.0f && targetY < 3.0f) {
+            float slope = (float) Math.pow(0.95f, 1.0f / (adjfreq / accel));
+            deltaNit = calculateChangeGapNit(false, currY, startY, stopY, slope, adjfreq, 1, accel);
+        } else {
+            switch (seq) {
+                case 0:
+                    deltaNit = calculateChangeGapNit(true, currY, startY, stopY,
+                            BRIGHTNESS_REGION_SLOPE[7], adjfreq, 1, accel);
+                    break;
+                case 1:
+                    if (currY < SEQ_ANIMATION_REGION[0]) {
+                        deltaNit = calculateChangeGapNit(true, currY, startY,
+                                SEQ_ANIMATION_REGION[0], BRIGHTNESS_REGION_SLOPE[6], adjfreq, 1, accel);
+                    } else {
+                        deltaNit = calculateChangeGapNit(true, currY, SEQ_ANIMATION_REGION[0],
+                                stopY, BRIGHTNESS_REGION_SLOPE[3], adjfreq, 2, accel);
+                    }
+                    break;
+                case 2: {
+                    float tempY = (SEQ_ANIMATION_WEIGHT[3] * stopY)
+                            + (SEQ_ANIMATION_WEIGHT[3] * startY);
+                    if (currY < SEQ_ANIMATION_REGION[0]) {
+                        deltaNit = calculateChangeGapNit(true, currY, startY,
+                                SEQ_ANIMATION_REGION[0], BRIGHTNESS_REGION_SLOPE[4], adjfreq, 1, accel);
+                    } else if (currY >= tempY) {
+                        deltaNit = calculateChangeGapNit(true, currY, tempY, stopY,
+                                BRIGHTNESS_REGION_SLOPE[6], adjfreq, 2, accel);
+                    } else {
+                        deltaNit = calculateChangeGapNit(true, currY, SEQ_ANIMATION_REGION[0],
+                                tempY, BRIGHTNESS_REGION_SLOPE[3], adjfreq, 1, accel);
+                    }
+                    break;
+                }
+                case 3: {
+                    float tempY = (SEQ_ANIMATION_WEIGHT[5] * stopY)
+                            + (SEQ_ANIMATION_WEIGHT[1] * startY);
+                    if (currY < tempY) {
+                        deltaNit = calculateChangeGapNit(true, currY, startY, tempY,
+                                BRIGHTNESS_REGION_SLOPE[8], adjfreq, 2, accel);
+                    } else {
+                        deltaNit = calculateChangeGapNit(true, currY, tempY, stopY,
+                                BRIGHTNESS_REGION_SLOPE[3], adjfreq, 2, accel);
+                    }
+                    break;
+                }
+                case 4: {
+                    float tempY = (SEQ_ANIMATION_WEIGHT[5] * stopY)
+                            + (SEQ_ANIMATION_WEIGHT[1] * startY);
+                    if (currY < tempY) {
+                        deltaNit = calculateChangeGapNit(true, currY, startY, tempY,
+                                BRIGHTNESS_REGION_SLOPE[6], adjfreq, 1, accel);
+                    } else {
+                        deltaNit = calculateChangeGapNit(true, currY, tempY, stopY,
+                                BRIGHTNESS_REGION_SLOPE[5], adjfreq, 2, accel);
+                    }
+                    break;
+                }
+                case 5: {
+                    float tempY = (SEQ_ANIMATION_WEIGHT[6] * startY)
+                            + (SEQ_ANIMATION_WEIGHT[0] * stopY);
+                    float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[0],
+                            1.0f / (adjfreq / accel));
+                    if (currY > tempY) {
+                        deltaNit = calculateChangeGapNit(false, currY, startY, tempY,
+                                slope, adjfreq, 1, accel);
+                    } else {
+                        deltaNit = calculateChangeGapNit(false, currY, tempY, stopY,
+                                slope, adjfreq, 2, accel);
+                    }
+                    break;
+                }
+                case 6: {
+                    float tempY = (SEQ_ANIMATION_WEIGHT[6] * startY)
+                            + (SEQ_ANIMATION_WEIGHT[0] * stopY);
+                    if (currY > tempY) {
+                        float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[0],
+                                1.0f / (adjfreq / accel));
+                        deltaNit = calculateChangeGapNit(false, currY, startY, tempY,
+                                slope, adjfreq, 1, accel);
+                    } else if (currY <= SEQ_ANIMATION_REGION[0]) {
+                        float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[2],
+                                1.0f / adjfreq);
+                        deltaNit = calculateChangeGapNit(false, currY, SEQ_ANIMATION_REGION[0],
+                                stopY, slope, adjfreq, 2, accel);
+                    } else {
+                        float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[0],
+                                1.0f / (adjfreq / accel));
+                        deltaNit = calculateChangeGapNit(false, currY, tempY,
+                                SEQ_ANIMATION_REGION[0], slope, adjfreq, 2, accel);
+                    }
+                    break;
+                }
+                case 7: {
+                    float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[0],
+                            1.0f / (adjfreq / accel));
+                    deltaNit = calculateChangeGapNit(false, currY, startY, stopY,
+                            slope, adjfreq, 2, accel);
+                    break;
+                }
+                case 8: {
+                    if (currY > SEQ_ANIMATION_REGION[0]) {
+                        float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[0],
+                                1.0f / (adjfreq / accel));
+                        deltaNit = calculateChangeGapNit(false, currY, startY,
+                                SEQ_ANIMATION_REGION[0], slope, adjfreq, 2, accel);
+                    } else {
+                        float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[2],
+                                1.0f / adjfreq);
+                        deltaNit = calculateChangeGapNit(false, currY, SEQ_ANIMATION_REGION[0],
+                                stopY, slope, adjfreq, 2, accel);
+                    }
+                    break;
+                }
+                case 9: {
+                    float slope = (float) Math.pow(BRIGHTNESS_REGION_SLOPE[2],
+                            1.0f / (adjfreq / accel));
+                    deltaNit = calculateChangeGapNit(false, currY, startY, stopY,
+                            slope, adjfreq, 1, accel);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        if (deltaNit <= 0.0f || Float.isNaN(deltaNit)) {
+            return Float.NaN;
+        }
+        // Ensure convergence near target without stalling on sub-step rounding.
+        float minStepNit = Math.max(0.01f, Math.abs(targetY - currY) * timeDelta * 0.5f);
+        deltaNit = Math.max(deltaNit, minStepNit);
+        float nextNit = (targetY > currY)
+                ? Math.min(currY + deltaNit, targetY)
+                : Math.max(currY - deltaNit, targetY);
+        float nextLinear = mNitConverter.getBrightnessFromNits(nextNit);
+        if (nextLinear < 0.0f || Float.isNaN(nextLinear)) {
+            return Float.NaN;
+        }
+        return nextLinear;
+    }
+
     void performNextAnimationStep(long frameTimeNanos) {
         final float timeDelta = (frameTimeNanos - mLastFrameTimeNanos) * 0.000000001f;
         mLastFrameTimeNanos = frameTimeNanos;
@@ -180,11 +464,30 @@ class RampAnimator<T> {
             // Animation off.
             mAnimatedValue = mTargetHlgValue;
         } else {
-            final float amount = timeDelta * mRate / scale;
-            if (mTargetHlgValue > mCurrentValue) {
-                mAnimatedValue = Math.min(mAnimatedValue + amount, mTargetHlgValue);
+            float nextHlg = Float.NaN;
+            if (mUseAutoStepper && mNitConverter != null && mRate > 0.0f) {
+                float currLinear = BrightnessUtils.convertGammaToLinear(mAnimatedValue);
+                float nextLinear = calcStockAutoStepperNextLinear(
+                        currLinear, mTargetLinearValue, timeDelta / scale);
+                if (!Float.isNaN(nextLinear)) {
+                    nextHlg = BrightnessUtils.convertLinearToGamma(nextLinear);
+                }
+            }
+            if (!Float.isNaN(nextHlg)) {
+                if (mTargetHlgValue > mCurrentValue) {
+                    mAnimatedValue = Math.min(Math.max(nextHlg, mAnimatedValue + 1e-5f),
+                            mTargetHlgValue);
+                } else {
+                    mAnimatedValue = Math.max(Math.min(nextHlg, mAnimatedValue - 1e-5f),
+                            mTargetHlgValue);
+                }
             } else {
-                mAnimatedValue = Math.max(mAnimatedValue - amount, mTargetHlgValue);
+                final float amount = timeDelta * mRate / scale;
+                if (mTargetHlgValue > mCurrentValue) {
+                    mAnimatedValue = Math.min(mAnimatedValue + amount, mTargetHlgValue);
+                } else {
+                    mAnimatedValue = Math.max(mAnimatedValue - amount, mTargetHlgValue);
+                }
             }
         }
         final float oldCurrentValue = mCurrentValue;
@@ -234,6 +537,15 @@ class RampAnimator<T> {
                     animationRampDecreaseMaxTimeMillis);
         }
 
+        public void setNitConverter(NitConverter converter) {
+            mFirst.setNitConverter(converter);
+            mSecond.setNitConverter(converter);
+        }
+
+        public void setAutoStepperParams(boolean useAutoStepper, float accelerateScale) {
+            mFirst.setAutoStepperParams(useAutoStepper, accelerateScale);
+            mSecond.setAutoStepperParams(useAutoStepper, accelerateScale);
+        }
         /**
          * Starts animating towards the specified values.
          *

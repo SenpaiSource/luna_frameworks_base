@@ -118,9 +118,11 @@ public class HighBrightnessModeData {
             minimumLux = hbm.getMinimumLux_all().floatValue();
             transitionPoint = transitionPointProvider.apply(hbm);
             HbmTiming hbmTiming = hbm.getTiming_all();
-            timeWindowMillis = hbmTiming.getTimeWindowSecs_all().longValue() * 1000;
-            timeMaxMillis = hbmTiming.getTimeMaxSecs_all().longValue() * 1000;
-            timeMinMillis = hbmTiming.getTimeMinSecs_all().longValue() * 1000;
+            if (hbmTiming != null) {
+                timeWindowMillis = hbmTiming.getTimeWindowSecs_all().longValue() * 1000;
+                timeMaxMillis = hbmTiming.getTimeMaxSecs_all().longValue() * 1000;
+                timeMinMillis = hbmTiming.getTimeMinSecs_all().longValue() * 1000;
+            }
             allowInLowPowerMode = hbm.getAllowInLowPowerMode_all();
             BigDecimal minHdrPctOfScreen = hbm.getMinimumHdrPercentOfScreen_all();
             if (minHdrPctOfScreen != null) {

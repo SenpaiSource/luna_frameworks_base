@@ -46,6 +46,7 @@ import com.android.systemui.dagger.qualifiers.Application;
 import com.android.systemui.dagger.qualifiers.Main;
 import com.android.systemui.doze.dagger.BrightnessSensor;
 import com.android.systemui.doze.dagger.DozeScope;
+import android.util.MathUtils;
 import com.android.systemui.doze.dagger.WrappedService;
 import com.android.systemui.keyguard.WakefulnessLifecycle;
 import com.android.systemui.scene.shared.flag.SceneContainerFlag;
@@ -107,6 +108,72 @@ public class DozeScreenBrightness extends BroadcastReceiver implements DozeMachi
     private final int[] mSensorToWallpaperScrimOpacity;
     private final int[] mSensorToScrimOpacity;
     private final float mScreenBrightnessDim;
+    private final int[] mAodLuxLevels;
+    private final float[] mAodLuxToBrightness;
+    private final Sensor mAmbientLightSensor;
+    private final Sensor mProximitySensor;
+    private boolean mAmbientLightRegistered;
+    private boolean mProximityRegistered;
+    private boolean mLastProxNear;
+    private boolean mWaitDelayFinish;
+    private boolean mIsFirstPanoramicAodBrightness = true;
+    private int mLightSensorSampleCount;
+    private float mLatestAmbientLux = -1.0f;
+    private final Runnable mDelayedAodBrightnessRunnable = () -> {
+        mWaitDelayFinish = false;
+        if (mLatestAmbientLux >= 0.0f) {
+            applyPanoramicAodLux(mLatestAmbientLux);
+        }
+    };
+    private final SensorEventListener mAmbientLightListener = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            if (!mRegistered || event.values == null || event.values.length == 0) {
+                return;
+            }
+            mLatestAmbientLux = event.values[0];
+            if (mIsFirstPanoramicAodBrightness) {
+                mLightSensorSampleCount = 4;
+                mIsFirstPanoramicAodBrightness = false;
+            } else {
+                mLightSensorSampleCount++;
+            }
+            if (mLightSensorSampleCount % 4 == 0) {
+                mLightSensorSampleCount = 0;
+                if (!mWaitDelayFinish && !mLastProxNear) {
+                    applyPanoramicAodLux(mLatestAmbientLux);
+                }
+                setAmbientLightSensorEnabled(false);
+            }
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        }
+    };
+    private final SensorEventListener mProximityListener = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            if (!mRegistered || mProximitySensor == null || event.values == null
+                    || event.values.length == 0) {
+                return;
+            }
+            boolean proxNear = event.values[0] < mProximitySensor.getMaximumRange();
+            if (mLastProxNear && !proxNear) {
+                mWaitDelayFinish = true;
+                mHandler.removeCallbacks(mDelayedAodBrightnessRunnable);
+                mHandler.postDelayed(mDelayedAodBrightnessRunnable, 1000L);
+            } else if (proxNear) {
+                mWaitDelayFinish = false;
+                mHandler.removeCallbacks(mDelayedAodBrightnessRunnable);
+            }
+            mLastProxNear = proxNear;
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        }
+    };
 
     @DevicePostureController.DevicePostureInt
     private int mDevicePosture;
@@ -185,6 +252,18 @@ public class DozeScreenBrightness extends BroadcastReceiver implements DozeMachi
         mSensorToScrimOpacity = alwaysOnDisplayPolicy.dimmingScrimArray;
         mSensorToWallpaperScrimOpacity = alwaysOnDisplayPolicy.wallpaperDimmingScrimArray;
 
+        mAodLuxLevels = context.getResources().getIntArray(
+                com.android.systemui.res.R.array.config_doze_lux_levels);
+        android.content.res.TypedArray aodBrightnessArray = context.getResources()
+                .obtainTypedArray(com.android.systemui.res.R.array.config_doze_lux_to_brightness_float);
+        mAodLuxToBrightness = new float[aodBrightnessArray.length()];
+        for (int i = 0; i < aodBrightnessArray.length(); i++) {
+            mAodLuxToBrightness[i] = aodBrightnessArray.getFloat(i, -1.0f);
+        }
+        aodBrightnessArray.recycle();
+        mAmbientLightSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
+        mProximitySensor = mSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
+
         mDevicePostureController.addCallback(mDevicePostureCallback);
     }
 
@@ -238,7 +317,11 @@ public class DozeScreenBrightness extends BroadcastReceiver implements DozeMachi
         TraceUtils.trace(() -> "DozeScreenBrightness.onSensorChanged" + event.values[0], () -> {
             if (mRegistered) {
                 mLastSensorValue = (int) event.values[0];
-                updateBrightnessAndReady(false /* force */);
+                if (hasPanoramicAodCurve()) {
+                    setAmbientLightSensorEnabled(true);
+                } else {
+                    updateBrightnessAndReady(false /* force */);
+                }
             }
             return Unit.INSTANCE;
         });
@@ -398,14 +481,95 @@ public class DozeScreenBrightness extends BroadcastReceiver implements DozeMachi
         }
     }
 
-    private void setLightSensorEnabled(boolean enabled) {
-        if (enabled && !mRegistered && isLightSensorPresent()) {
-            // Wait until we get an event from the sensor until indicating ready.
-            mRegistered = mSensorManager.registerListener(this, getLightSensor(),
+    private boolean hasPanoramicAodCurve() {
+        return mAodLuxLevels != null && mAodLuxToBrightness != null
+                && mAodLuxLevels.length > 0 && mAodLuxToBrightness.length > 0
+                && mAmbientLightSensor != null;
+    }
+
+    private float computePanoramicAodBrightness(float lux) {
+        if (mAodLuxLevels == null || mAodLuxToBrightness == null
+                || mAodLuxLevels.length == 0 || mAodLuxToBrightness.length == 0) {
+            return -1.0f;
+        }
+        int rank = 0;
+        int maxIdx = mAodLuxLevels.length - 1;
+        if (lux >= mAodLuxLevels[maxIdx]) {
+            rank = maxIdx;
+        } else if (lux >= mAodLuxLevels[0]) {
+            for (int i = 0; i < maxIdx; i++) {
+                if (lux >= mAodLuxLevels[i] && lux < mAodLuxLevels[i + 1]) {
+                    rank = i;
+                    break;
+                }
+            }
+        }
+        int clampedRank = Math.min(rank, mAodLuxToBrightness.length - 1);
+        return mAodLuxToBrightness[clampedRank];
+    }
+
+    private void applyPanoramicAodLux(float lux) {
+        if (applyAuroraBrightness()) {
+            return;
+        }
+        float brightness = computePanoramicAodBrightness(lux);
+        if (brightness > 0.0f) {
+            brightness = MathUtils.constrain(clampToUserSetting(brightness),
+                    PowerManager.BRIGHTNESS_MIN, PowerManager.BRIGHTNESS_MAX);
+            mDozeService.setDozeScreenBrightness(clampToDimBrightnessForScreenOff(brightness));
+        }
+        mDozeHost.setAodDimmingScrim(0f);
+        mDozeHost.setAodWallpaperDimmingScrim(0f);
+    }
+
+    private void setAmbientLightSensorEnabled(boolean enabled) {
+        if (enabled && !mAmbientLightRegistered && mAmbientLightSensor != null) {
+            mLightSensorSampleCount = 0;
+            mAmbientLightRegistered = mSensorManager.registerListener(
+                    mAmbientLightListener, mAmbientLightSensor,
+                    SensorManager.SENSOR_DELAY_UI, mHandler);
+        } else if (!enabled && mAmbientLightRegistered) {
+            mSensorManager.unregisterListener(mAmbientLightListener);
+            mAmbientLightRegistered = false;
+        }
+    }
+
+    private void setProximitySensorEnabled(boolean enabled) {
+        if (enabled && !mProximityRegistered && mProximitySensor != null) {
+            mLastProxNear = false;
+            mWaitDelayFinish = false;
+            mProximityRegistered = mSensorManager.registerListener(
+                    mProximityListener, mProximitySensor,
                     SensorManager.SENSOR_DELAY_NORMAL, mHandler);
+        } else if (!enabled && mProximityRegistered) {
+            mSensorManager.unregisterListener(mProximityListener);
+            mProximityRegistered = false;
+            mWaitDelayFinish = false;
+            mHandler.removeCallbacks(mDelayedAodBrightnessRunnable);
+        }
+    }
+
+    private void setLightSensorEnabled(boolean enabled) {
+        if (enabled && !mRegistered && (isLightSensorPresent() || hasPanoramicAodCurve())) {
+            mIsFirstPanoramicAodBrightness = true;
+            if (isLightSensorPresent()) {
+                // Wait until we get an event from the sensor until indicating ready.
+                mRegistered = mSensorManager.registerListener(this, getLightSensor(),
+                        SensorManager.SENSOR_DELAY_NORMAL, mHandler);
+            } else {
+                mRegistered = true;
+            }
+            if (hasPanoramicAodCurve()) {
+                setProximitySensorEnabled(true);
+                setAmbientLightSensorEnabled(true);
+            }
             mLastSensorValue = -1;
         } else if (!enabled && mRegistered) {
-            mSensorManager.unregisterListener(this);
+            if (isLightSensorPresent()) {
+                mSensorManager.unregisterListener(this);
+            }
+            setAmbientLightSensorEnabled(false);
+            setProximitySensorEnabled(false);
             mRegistered = false;
             mLastSensorValue = -1;
             // Sensor is not enabled, hence we use the default brightness and are always ready.
