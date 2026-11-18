@@ -41,6 +41,17 @@ public class CurveConfig {
     private static final String TAG_NIT = "nit";
     private static final String TAG_RANGE = "range";
     private static final String TAG_SALES_MODE_SCREEN_BRIGHTNESS = "sales_mode_screen_brightness";
+    private static final String TAG_HDR_VISION = "hdr_vision";
+    private static final String TAG_GAME_EDR = "game_edr";
+    private static final String TAG_ORIGIN_NIT = "origin_nit";
+    private static final String TAG_ENHANCE_NIT = "enhance_nit";
+    private static final String TAG_FACTOR = "factor";
+
+    private float[] mHdrVisionOriginNits = null;
+    private float[] mHdrVisionEnhanceNits = null;
+    private HashMap<Integer, float[]> mGameEdrOriginNits = new HashMap<>();
+    private HashMap<Integer, float[]> mGameEdrEnhanceNits = new HashMap<>();
+    private int mCurrentFactor = -1;
     private static final String mSettingsMinBrightnessProp = SystemProperties.get("ro.oplus.display.brightness.min_settings.rm", DeepThinkerDelegate.InOutDoorImpl.Constants.EMPTY);
     private static final int FORCE_LUXTABLEMODE_ID = SystemProperties.getInt("ro.oplus.display.force_LuxTableMode_ID", 0);
     private final AutoReleaseReadWriteLock mLock = new AutoReleaseReadWriteLock();
@@ -156,8 +167,13 @@ public class CurveConfig {
 
     public void traversalPanelMaps(final float[] array, final int index) {
         this.mLock.executeReadOperation(() -> {
-            for (int i = 0; i < this.mPanelBrightnessTable.size(); i++) {
-                array[i] = this.mPanelBrightnessTable.get(Integer.valueOf(i))[index];
+            if (array == null) return null;
+            int limit = Math.min(array.length, this.mPanelBrightnessTable.size());
+            for (int i = 0; i < limit; i++) {
+                float[] entry = this.mPanelBrightnessTable.get(Integer.valueOf(i));
+                if (entry != null && index >= 0 && index < entry.length) {
+                    array[i] = entry[index];
+                }
             }
             return null;
         });
@@ -166,8 +182,13 @@ public class CurveConfig {
     
     public void traversalPanelMapsPWM(final float[] array, final int index) {
         this.mLock.executeReadOperation(() -> {
-            for (int i = 0; i < this.mPanelBrightnessTablePWM.size(); i++) {
-                array[i] = this.mPanelBrightnessTablePWM.get(Integer.valueOf(i))[index];
+            if (array == null) return null;
+            int limit = Math.min(array.length, this.mPanelBrightnessTablePWM.size());
+            for (int i = 0; i < limit; i++) {
+                float[] entry = this.mPanelBrightnessTablePWM.get(Integer.valueOf(i));
+                if (entry != null && index >= 0 && index < entry.length) {
+                    array[i] = entry[index];
+                }
             }
             return null;
         });
@@ -176,8 +197,13 @@ public class CurveConfig {
     
     public void traversalPanelMapsSPD(final float[] array, final int index) {
         this.mLock.executeReadOperation(() -> {
-            for (int i = 0; i < this.mPanelBrightnessTableSPD.size(); i++) {
-                array[i] = this.mPanelBrightnessTableSPD.get(Integer.valueOf(i))[index];
+            if (array == null) return null;
+            int limit = Math.min(array.length, this.mPanelBrightnessTableSPD.size());
+            for (int i = 0; i < limit; i++) {
+                float[] entry = this.mPanelBrightnessTableSPD.get(Integer.valueOf(i));
+                if (entry != null && index >= 0 && index < entry.length) {
+                    array[i] = entry[index];
+                }
             }
             return null;
         });
@@ -263,6 +289,9 @@ public class CurveConfig {
                     tag.tableCnt = 0;
                     return;
                 }
+                if (TAG_GAME_EDR.equals(tag.topTag)) {
+                    this.mCurrentFactor = XmlUtils.convertValueToInt(parser.getAttributeValue(null, TAG_FACTOR), -1);
+                }
                 if (TAG_BRIGHTNESS_TABLE.equals(tag.startTag)) {
                     this.mMaxLevel = XmlUtils.convertValueToInt(parser.getAttributeValue(null, TAG_MAX), this.mMaxLevel);
                     this.mMinLevel = XmlUtils.convertValueToInt(parser.getAttributeValue(null, TAG_MIN), this.mMinLevel);
@@ -331,29 +360,22 @@ public class CurveConfig {
                         int i2 = 0;
                         while (i2 < ts.length - 1) {
                             String[] texts2 = ts[i2].split(",");
-                            float brightness = Float.parseFloat(texts2[0].trim());
-                            float backlight = Float.parseFloat(texts2[1].trim());
-                            float nit2 = Float.parseFloat(texts2[c].trim());
-                            float pcc = Float.parseFloat(texts2[3].trim());
-                            char c2 = c;
-                            float[] brightnessparameters = new float[i];
-                            brightnessparameters[0] = brightness;
-                            brightnessparameters[1] = backlight;
-                            brightnessparameters[c2] = nit2;
-                            brightnessparameters[3] = pcc;
+                            float brightness = OplusBrightnessUtils.parseFloatSafe(texts2[0].trim(), 0.0f);
+                            float backlight = texts2.length > 1 ? OplusBrightnessUtils.parseFloatSafe(texts2[1].trim(), 0.0f) : 0.0f;
+                            float nit2 = texts2.length > 2 ? OplusBrightnessUtils.parseFloatSafe(texts2[2].trim(), 0.0f) : 0.0f;
+                            float pcc = texts2.length > 3 ? OplusBrightnessUtils.parseFloatSafe(texts2[3].trim(), 1.0f) : 1.0f;
+                            float[] brightnessparameters = new float[]{brightness, backlight, nit2, pcc};
                             this.mPanelBrightnessTable.put(Integer.valueOf(tag.tableCnt), brightnessparameters);
                             tag.tableCnt++;
                             i2++;
-                            c = c2;
-                            i = 4;
                         }
                         return;
                     }
                     String[] texts3 = text.split(",");
-                    float brightness2 = Float.parseFloat(texts3[0].trim());
-                    float backlight2 = Float.parseFloat(texts3[1].trim());
-                    float nit3 = Float.parseFloat(texts3[2].trim());
-                    float pcc2 = Float.parseFloat(texts3[3].trim());
+                    float brightness2 = OplusBrightnessUtils.parseFloatSafe(texts3[0].trim(), 0.0f);
+                    float backlight2 = texts3.length > 1 ? OplusBrightnessUtils.parseFloatSafe(texts3[1].trim(), 0.0f) : 0.0f;
+                    float nit3 = texts3.length > 2 ? OplusBrightnessUtils.parseFloatSafe(texts3[2].trim(), 0.0f) : 0.0f;
+                    float pcc2 = texts3.length > 3 ? OplusBrightnessUtils.parseFloatSafe(texts3[3].trim(), 1.0f) : 1.0f;
                     float[] brightnessparameters2 = {brightness2, backlight2, nit3, pcc2};
                     this.mPanelBrightnessTable.put(Integer.valueOf(tag.tableCnt), brightnessparameters2);
                     tag.tableCnt++;
@@ -361,10 +383,10 @@ public class CurveConfig {
                 }
                 if (TAG_BRIGHTNESS_TABLE_PWM.equals(tag.topTag) && TAG_LEVEL.equals(tag.startTag)) {
                     String[] texts4 = text.split(",");
-                    float brightness3 = Float.parseFloat(texts4[0].trim());
-                    float backlight3 = Float.parseFloat(texts4[1].trim());
-                    float nit4 = Float.parseFloat(texts4[c].trim());
-                    float pcc3 = Float.parseFloat(texts4[3].trim());
+                    float brightness3 = OplusBrightnessUtils.parseFloatSafe(texts4[0].trim(), 0.0f);
+                    float backlight3 = texts4.length > 1 ? OplusBrightnessUtils.parseFloatSafe(texts4[1].trim(), 0.0f) : 0.0f;
+                    float nit4 = texts4.length > 2 ? OplusBrightnessUtils.parseFloatSafe(texts4[2].trim(), 0.0f) : 0.0f;
+                    float pcc3 = texts4.length > 3 ? OplusBrightnessUtils.parseFloatSafe(texts4[3].trim(), 1.0f) : 1.0f;
                     float[] brightnessparameters3 = {brightness3, backlight3, nit4, pcc3};
                     this.mPanelBrightnessTablePWM.put(Integer.valueOf(tag.tableCnt), brightnessparameters3);
                     tag.tableCnt++;
@@ -372,10 +394,10 @@ public class CurveConfig {
                 }
                 if (TAG_BRIGHTNESS_TABLE_SINGLE_PULSE.equals(tag.topTag) && TAG_LEVEL.equals(tag.startTag)) {
                     String[] texts5 = text.split(",");
-                    float brightness4 = Float.parseFloat(texts5[0].trim());
-                    float backlight4 = Float.parseFloat(texts5[1].trim());
-                    float nit5 = Float.parseFloat(texts5[c].trim());
-                    float pcc4 = Float.parseFloat(texts5[3].trim());
+                    float brightness4 = OplusBrightnessUtils.parseFloatSafe(texts5[0].trim(), 0.0f);
+                    float backlight4 = texts5.length > 1 ? OplusBrightnessUtils.parseFloatSafe(texts5[1].trim(), 0.0f) : 0.0f;
+                    float nit5 = texts5.length > 2 ? OplusBrightnessUtils.parseFloatSafe(texts5[2].trim(), 0.0f) : 0.0f;
+                    float pcc4 = texts5.length > 3 ? OplusBrightnessUtils.parseFloatSafe(texts5[3].trim(), 1.0f) : 1.0f;
                     float[] brightnessparameters4 = {brightness4, backlight4, nit5, pcc4};
                     this.mPanelBrightnessTableSPD.put(Integer.valueOf(tag.tableCnt), brightnessparameters4);
                     tag.tableCnt++;
@@ -383,7 +405,7 @@ public class CurveConfig {
                 }
                 if (TAG_LUX_TABLE_MODE.equals(tag.startTag)) {
                     if (!this.mIsForceMode) {
-                        this.mLuxTableMode = Integer.parseInt(text.trim());
+                        this.mLuxTableMode = OplusBrightnessUtils.parseIntSafe(text.trim(), 0);
                         return;
                     } else {
                         this.mLuxTableMode = FORCE_LUXTABLEMODE_ID;
@@ -413,7 +435,7 @@ public class CurveConfig {
                 }
                 if (TAG_HBM_LUX_TABLE_MODE.equals(tag.startTag)) {
                     if (!this.mIsForceMode) {
-                        this.mHbmLuxTableMode = Integer.parseInt(text.trim());
+                        this.mHbmLuxTableMode = OplusBrightnessUtils.parseIntSafe(text.trim(), 0);
                         return;
                     } else {
                         this.mHbmLuxTableMode = FORCE_LUXTABLEMODE_ID;
@@ -424,8 +446,8 @@ public class CurveConfig {
                 if (TAG_FILTER_LEVELS.equals(tag.topTag) && TAG_NIT.equals(tag.startTag)) {
                     if (this.mapManufactureCnt == 1 || (this.manufacture != null && this.mapManufactureCnt > 1 && this.manufacture.equals(mManufacture))) {
                         String[] texts7 = text.split(",");
-                        float brightness5 = Float.parseFloat(texts7[0].trim());
-                        float nit6 = Float.parseFloat(texts7[1].trim());
+                        float brightness5 = OplusBrightnessUtils.parseFloatSafe(texts7[0].trim(), 0.0f);
+                        float nit6 = texts7.length > 1 ? OplusBrightnessUtils.parseFloatSafe(texts7[1].trim(), 0.0f) : 0.0f;
                         float[] brightnessparameters5 = {brightness5, brightness5, nit6, 1.0f};
                         if (tag.tableCnt == 0) {
                             brightnessparameters5 = new float[]{0.0f, 0.0f, 0.0f, 1.0f};
@@ -436,6 +458,32 @@ public class CurveConfig {
                         this.mPanelBrightnessTable.put(Integer.valueOf(tag.tableCnt), brightnessparameters5);
                         tag.tableCnt++;
                         return;
+                    }
+                    return;
+                }
+                if (TAG_HDR_VISION.equals(tag.topTag)) {
+                    String[] parts = text.split(",");
+                    float[] vals = new float[parts.length];
+                    for (int idx = 0; idx < parts.length; idx++) {
+                        vals[idx] = OplusBrightnessUtils.parseFloatSafe(parts[idx].trim(), 0.0f);
+                    }
+                    if (TAG_ORIGIN_NIT.equals(tag.startTag)) {
+                        this.mHdrVisionOriginNits = vals;
+                    } else if (TAG_ENHANCE_NIT.equals(tag.startTag)) {
+                        this.mHdrVisionEnhanceNits = vals;
+                    }
+                    return;
+                }
+                if (TAG_GAME_EDR.equals(tag.topTag)) {
+                    String[] parts = text.split(",");
+                    float[] vals = new float[parts.length];
+                    for (int idx = 0; idx < parts.length; idx++) {
+                        vals[idx] = OplusBrightnessUtils.parseFloatSafe(parts[idx].trim(), 0.0f);
+                    }
+                    if (TAG_ORIGIN_NIT.equals(tag.startTag)) {
+                        this.mGameEdrOriginNits.put(this.mCurrentFactor, vals);
+                    } else if (TAG_ENHANCE_NIT.equals(tag.startTag)) {
+                        this.mGameEdrEnhanceNits.put(this.mCurrentFactor, vals);
                     }
                     return;
                 }
@@ -477,10 +525,13 @@ public class CurveConfig {
         }
         if (panelNitSize > 0) {
             for (int i = 0; i < this.mNitTable.size(); i++) {
-                if (this.mNitTable.get(Integer.valueOf(i)).intValue() < panelNitSize) {
-                    this.mNitTable.replace(Integer.valueOf(i), Float.valueOf(this.mPanelBrightnessTable.get(Integer.valueOf(this.mNitTable.get(Integer.valueOf(i)).intValue()))[2]));
-                } else {
-                    this.mNitTable.replace(Integer.valueOf(i), Float.valueOf(this.mPanelBrightnessTable.get(Integer.valueOf(panelNitSize - 1))[2]));
+                Float nitVal = this.mNitTable.get(Integer.valueOf(i));
+                int targetIdx = (nitVal != null && nitVal.intValue() < panelNitSize)
+                        ? Math.max(0, nitVal.intValue())
+                        : (panelNitSize - 1);
+                float[] entry = this.mPanelBrightnessTable.get(Integer.valueOf(targetIdx));
+                if (entry != null && entry.length > 2) {
+                    this.mNitTable.replace(Integer.valueOf(i), Float.valueOf(entry[2]));
                 }
             }
         }
@@ -525,7 +576,7 @@ public class CurveConfig {
         if (!result.equals("1")) {
             String[] array = result.trim().split(",");
             for (int i = 0; i < array.length; i++) {
-                float value = Float.parseFloat(array[i]);
+                float value = OplusBrightnessUtils.parseFloatSafe(array[i].trim(), 0.0f);
                 map.put(Integer.valueOf(i), Float.valueOf(value));
             }
             return true;
@@ -536,7 +587,7 @@ public class CurveConfig {
     private int parseValueFromProp(String property) {
         String result = SystemProperties.get(property, "1");
         if (!result.equals("1")) {
-            return Integer.parseInt(result.trim());
+            return OplusBrightnessUtils.parseIntSafe(result.trim(), -1);
         }
         return -1;
     }
@@ -567,13 +618,13 @@ public class CurveConfig {
             return false;
         }
         for (int i = 0; i < keyArray.length; i++) {
-            float key = Float.parseFloat(keyArray[i]);
-            float value = Float.parseFloat(valueArray[i]);
+            float key = OplusBrightnessUtils.parseFloatSafe(keyArray[i].trim(), 0.0f);
+            float value = OplusBrightnessUtils.parseFloatSafe(valueArray[i].trim(), 0.0f);
             if (panelNitSize > 0) {
-                if (((int) value) < panelNitSize) {
-                    value = this.mPanelBrightnessTable.get(Integer.valueOf((int) value))[2];
-                } else {
-                    value = this.mPanelBrightnessTable.get(Integer.valueOf(panelNitSize - 1))[2];
+                int targetIdx = ((int) value < panelNitSize) ? Math.max(0, (int) value) : (panelNitSize - 1);
+                float[] entry = this.mPanelBrightnessTable.get(Integer.valueOf(targetIdx));
+                if (entry != null && entry.length > 2) {
+                    value = entry[2];
                 }
             }
             map.put(Integer.valueOf(i), new Float[]{Float.valueOf(key), Float.valueOf(value)});
@@ -582,6 +633,16 @@ public class CurveConfig {
     }
 
     public void ensureDefaultCalibration() {
+        if (this.mHdrVisionOriginNits == null || this.mHdrVisionOriginNits.length == 0) {
+            this.mHdrVisionOriginNits = new float[]{0f, 60f, 60f, 200f, 200f, 2000f};
+            this.mHdrVisionEnhanceNits = new float[]{0f, 180f, 360f, 1100f, 1100f, 1100f};
+        }
+        if (this.mGameEdrOriginNits.isEmpty()) {
+            this.mGameEdrOriginNits.put(25, new float[]{0f, 60f, 60f, 150f, 150f, 600f, 600f, 2000f});
+            this.mGameEdrEnhanceNits.put(25, new float[]{0f, 120f, 138f, 345f, 345f, 600f, 600f, 2000f});
+            this.mGameEdrOriginNits.put(27, new float[]{0f, 60f, 60f, 150f, 150f, 600f, 600f, 2000f});
+            this.mGameEdrEnhanceNits.put(27, new float[]{0f, 120f, 150f, 375f, 375f, 600f, 600f, 2000f});
+        }
         if (!this.mLuxTable.isEmpty() && !this.mPanelBrightnessTable.isEmpty()) {
             return;
         }
@@ -622,5 +683,37 @@ public class CurveConfig {
                 this.mPanelBrightnessTable.put(level, new float[]{brightness, backlight, nit, 1.0f});
             }
         }
+    }
+
+    public float calculateEnhanceNit(float currentNit, int factor) {
+        float[] origin = null;
+        float[] enhance = null;
+        if (factor > 0 && this.mGameEdrOriginNits.containsKey(factor)) {
+            origin = this.mGameEdrOriginNits.get(factor);
+            enhance = this.mGameEdrEnhanceNits.get(factor);
+        } else {
+            origin = this.mHdrVisionOriginNits;
+            enhance = this.mHdrVisionEnhanceNits;
+        }
+        if (origin == null || enhance == null || origin.length == 0 || origin.length != enhance.length) {
+            return currentNit;
+        }
+        float res = currentNit;
+        int index = -1;
+        for (int i = 0; i < origin.length; i++) {
+            if (currentNit < origin[i]) {
+                index = i;
+                break;
+            }
+        }
+        if (index > 0 && index < origin.length && origin[index] != origin[index - 1]) {
+            float k = (enhance[index] - enhance[index - 1]) / (origin[index] - origin[index - 1]);
+            res = ((currentNit - origin[index - 1]) * k) + enhance[index - 1];
+        } else if (index == -1 && origin.length > 0) {
+            res = enhance[enhance.length - 1];
+        } else if (index == 0) {
+            res = enhance[0];
+        }
+        return Math.max(res, currentNit);
     }
 }

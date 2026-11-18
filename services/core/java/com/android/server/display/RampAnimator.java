@@ -567,9 +567,15 @@ class RampAnimator<T> {
          */
         public boolean animateTo(float linearFirstTarget, float linearSecondTarget, float rate,
                 boolean ignoreAnimationLimits) {
+            return animateTo(linearFirstTarget, linearSecondTarget, rate, rate, ignoreAnimationLimits);
+        }
+
+        public boolean animateTo(float linearFirstTarget, float linearSecondTarget, float rate,
+                float sdrRate, boolean ignoreAnimationLimits) {
+            float secondRate = (sdrRate > 0) ? sdrRate : rate;
             boolean animationTargetChanged = mFirst.setAnimationTarget(linearFirstTarget, rate,
                     ignoreAnimationLimits);
-            animationTargetChanged |= mSecond.setAnimationTarget(linearSecondTarget, rate,
+            animationTargetChanged |= mSecond.setAnimationTarget(linearSecondTarget, secondRate,
                     ignoreAnimationLimits);
             boolean shouldBeAnimating = isAnimating();
 
@@ -616,6 +622,12 @@ class RampAnimator<T> {
                 }
                 if (mSecond.isAnimating()) {
                     mSecond.performNextAnimationStep(frameTimeNanos);
+                }
+                if (!mFirst.isAnimating() && mSecond.isAnimating()
+                        && Math.abs(mSecond.mAnimatedValue - mSecond.mTargetHlgValue) < 0.005f) {
+                    mSecond.mCurrentValue = mSecond.mTargetHlgValue;
+                    mSecond.setPropertyValue(mSecond.mCurrentValue);
+                    mSecond.mAnimating = false;
                 }
                 if (isAnimating()) {
                     postAnimationCallback();

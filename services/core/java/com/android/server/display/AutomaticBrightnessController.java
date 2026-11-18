@@ -512,6 +512,11 @@ public class AutomaticBrightnessController implements
             changed |= setAutoBrightnessAdjustment(adjustment);
         }
         final boolean enable = mState == AUTO_BRIGHTNESS_ENABLED;
+        if (!enable && Display.isDozeState(displayState) && mBrightnessModel != null) {
+            // Stock ColorOS keep-alive: keep AmbientAdapter active during AOD without forcing ABC enable
+            OplusBrightnessAmbientAdapter.getInstance().setSensorManager(mSensorManager, mLightSensor);
+            OplusBrightnessAmbientAdapter.getInstance().brightnessModeChanged(true);
+        }
         if (userChangedBrightness && enable) {
             // Update the brightness curve with the new user control point. It's critical this
             // happens after we update the autobrightness adjustment since it may reset it.
@@ -568,6 +573,10 @@ public class AutomaticBrightnessController implements
 
     float getAmbientLux() {
         return mAmbientLux;
+    }
+
+    public int getForegroundAppCategory() {
+        return mForegroundAppCategory;
     }
 
     /**
@@ -840,25 +849,29 @@ public class AutomaticBrightnessController implements
                 return true;
             }
         } else if (mLightSensorEnabled) {
-            mLightSensorEnabled = false;
-            mScreenOnBoostEndTime = 0;
-            mAccelerateScale = 1.0f;
-            mIsBrightnessAnimating = false;
-            mAmbientLuxValid = !mResetAmbientLuxAfterWarmUpConfig;
-            if (!mAmbientLuxValid) {
-                mPreThresholdLux = PowerManager.BRIGHTNESS_INVALID_FLOAT;
+            boolean keepSensorAliveInDoze = (mBrightnessModel != null)
+                    && (mDisplayState != Display.STATE_OFF && Display.isDozeState(mDisplayState));
+            if (!keepSensorAliveInDoze) {
+                mLightSensorEnabled = false;
+                mScreenOnBoostEndTime = 0;
+                mAccelerateScale = 1.0f;
+                mIsBrightnessAnimating = false;
+                mAmbientLuxValid = !mResetAmbientLuxAfterWarmUpConfig;
+                if (!mAmbientLuxValid) {
+                    mPreThresholdLux = PowerManager.BRIGHTNESS_INVALID_FLOAT;
+                }
+                mScreenAutoBrightness = PowerManager.BRIGHTNESS_INVALID_FLOAT;
+                mRawScreenAutoBrightness = PowerManager.BRIGHTNESS_INVALID_FLOAT;
+                mPreThresholdBrightness = PowerManager.BRIGHTNESS_INVALID_FLOAT;
+                mRecentLightSamples = 0;
+                if (mBrightnessModel == null) {
+                    mAmbientLightRingBuffer.clear();
+                }
+                mCurrentLightSensorRate = -1;
+                mHandler.removeMessages(MSG_UPDATE_AMBIENT_LUX);
+                unregisterForegroundAppUpdater();
+                OplusBrightnessAmbientAdapter.getInstance().brightnessModeChanged(false);
             }
-            mScreenAutoBrightness = PowerManager.BRIGHTNESS_INVALID_FLOAT;
-            mRawScreenAutoBrightness = PowerManager.BRIGHTNESS_INVALID_FLOAT;
-            mPreThresholdBrightness = PowerManager.BRIGHTNESS_INVALID_FLOAT;
-            mRecentLightSamples = 0;
-            if (mBrightnessModel == null) {
-                mAmbientLightRingBuffer.clear();
-            }
-            mCurrentLightSensorRate = -1;
-            mHandler.removeMessages(MSG_UPDATE_AMBIENT_LUX);
-            unregisterForegroundAppUpdater();
-            OplusBrightnessAmbientAdapter.getInstance().brightnessModeChanged(false);
         }
         return false;
     }

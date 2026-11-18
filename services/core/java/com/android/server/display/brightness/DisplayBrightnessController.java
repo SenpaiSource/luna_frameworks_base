@@ -535,6 +535,12 @@ public final class DisplayBrightnessController {
         }
     }
 
+    public void setBrightnessModel(com.android.server.display.IDisplayBrightnessModelExt model) {
+        synchronized (mLock) {
+            mDisplayBrightnessStrategySelector.setBrightnessModel(model);
+        }
+    }
+
     /**
      * Update the config values. Needs to be called when the underlying display device changes.
      * @param config The Display Device Config

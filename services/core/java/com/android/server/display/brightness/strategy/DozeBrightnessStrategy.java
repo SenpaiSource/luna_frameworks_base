@@ -47,6 +47,11 @@ public class DozeBrightnessStrategy implements DisplayBrightnessStrategy {
 
     // The DisplayId of the associated logical display
     private final int mDisplayId;
+    private com.android.server.display.IDisplayBrightnessModelExt mBrightnessModel;
+
+    public void setBrightnessModel(com.android.server.display.IDisplayBrightnessModelExt model) {
+        mBrightnessModel = model;
+    }
 
     public DozeBrightnessStrategy(DisplayManagerFlags flags, Context context, int displayId,
             float defaultDozeBrightness) {
@@ -91,8 +96,45 @@ public class DozeBrightnessStrategy implements DisplayBrightnessStrategy {
                     .build();
         }
 
+        // Use default brightness when dozing unless overridden, mapped through ColorOS lux_aod.json bands
+        float defaultBrightness = mDefaultDozeBrightness;
+        try {
+            com.android.server.display.feature.ambience.utils.OplusLuxResult luxRes =
+                    com.android.server.display.feature.ambience.OplusBrightnessAmbientAdapter.getInstance().getLuxResult();
+            if (com.android.server.display.config.OplusAodLuxConfig.getInstance().getDeployMultiAod() == 1
+                    && luxRes != null && !Float.isNaN(luxRes.getFinalLux()) && luxRes.getFinalLux() >= 0.0f) {
+                float currentLux = luxRes.getFinalLux();
+                int aodTier = com.android.server.display.config.OplusAodLuxConfig.getInstance().getAodTier(currentLux);
+                float targetNit;
+                if (aodTier == 1) {
+                    targetNit = 2.5f; // Deep dark room floor (Table 30 minimum floor: 2.5 nits)
+                } else if (aodTier == 2) {
+                    targetNit = 10.0f; // Calibrated doze floor (stock LONGTAKE_AOD_NIT_10)
+                } else {
+                    targetNit = (float) android.os.SystemProperties.getInt("ro.oplus.display.aod.brightness", 50); // Daylight AOD (stock LONGTAKE_AOD_NIT_50)
+                }
+
+                if (mBrightnessModel != null) {
+                    float bl = mBrightnessModel.getValueByCurve(com.android.server.display.util.OplusBrightnessConstants.NIT_SPLINE, targetNit);
+                    float maxBl = mBrightnessModel.getMaxBrightness();
+                    if (!Float.isNaN(bl) && bl > 0.0f && maxBl > 0.0f) {
+                        defaultBrightness = bl / maxBl;
+                    }
+                } else {
+                    if (aodTier == 1) {
+                        defaultBrightness = Math.max(0.000488f, mDefaultDozeBrightness * (targetNit / 10.0f));
+                    } else if (aodTier == 2) {
+                        defaultBrightness = mDefaultDozeBrightness;
+                    } else {
+                        defaultBrightness = Math.max(mDefaultDozeBrightness, mDefaultDozeBrightness * (targetNit / 10.0f));
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            defaultBrightness = mDefaultDozeBrightness;
+        }
         return BrightnessUtils.constructDisplayBrightnessState(BrightnessReason.REASON_DOZE_DEFAULT,
-                mDefaultDozeBrightness, getName(), /* slowChange= */ false);
+                defaultBrightness, getName(), /* slowChange= */ false);
     }
 
     @Override

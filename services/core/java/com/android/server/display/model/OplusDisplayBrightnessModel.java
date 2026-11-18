@@ -64,6 +64,8 @@ public class OplusDisplayBrightnessModel implements IDisplayBrightnessModelExt {
     public final boolean mIsSlopeRMSupport;
     public float mLastCurY;
     public float mLeftScaleInDarkEnv;
+    private OplusDisplayDeviceConfig mDeviceConfig;
+    private CurveConfig mCurveConfig;
     private AutoReleaseReadWriteLock mLock;
     public float mLowBrightnessPercent;
     public float mLowDownScale;
@@ -195,6 +197,8 @@ public class OplusDisplayBrightnessModel implements IDisplayBrightnessModelExt {
             return;
         }
         CurveConfig curveConfig = cfg.getCurveConfig();
+        this.mDeviceConfig = cfg;
+        this.mCurveConfig = curveConfig;
         this.mGlobalConfig = OplusDisplayGlobalConfig.getInstance();
         this.mPhysicalDisplayId = physicalDisplayId;
         this.mModelType = type;
@@ -628,5 +632,21 @@ public class OplusDisplayBrightnessModel implements IDisplayBrightnessModelExt {
             }
         }
         return nextChange;
+    }
+
+    public CurveConfig getCurveConfig() {
+        return this.mCurveConfig;
+    }
+
+    public OplusDisplayDeviceConfig getDeviceConfig() {
+        return this.mDeviceConfig;
+    }
+
+    @Override
+    public float calculateEnhanceNit(float currentNit, int factor) {
+        if (this.mCurveConfig != null) {
+            return this.mCurveConfig.calculateEnhanceNit(currentNit, factor);
+        }
+        return currentNit;
     }
 }

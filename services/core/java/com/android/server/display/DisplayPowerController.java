@@ -908,6 +908,20 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
     }
 
     private IDisplayBrightnessModelExt mDisplayBrightnessModel;
+    private com.android.server.display.feature.postprocess.OplusBrightnessPostProcessingManager mPostProcessingManager;
+    private float mOplusCurrentNit = 0.0f;
+    private int mOplusRateType = 0;
+    private int mOplusRate = 0;
+
+    public com.android.server.display.feature.postprocess.OplusBrightnessPostProcessingManager getPostProcessingManager() {
+        if (mPostProcessingManager == null) {
+            mPostProcessingManager = new com.android.server.display.feature.postprocess.OplusBrightnessPostProcessingManager(
+                    mDisplayId, getDisplayBrightnessModel());
+        } else {
+            mPostProcessingManager.setBrightnessModel(getDisplayBrightnessModel());
+        }
+        return mPostProcessingManager;
+    }
 
     public IDisplayBrightnessModelExt getDisplayBrightnessModel() {
         if (mDisplayBrightnessModel == null) {
@@ -1150,6 +1164,12 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
         mScreenOffAnimation = readScreenOffAnimationSetting();
         mPowerState = mInjector.getDisplayPowerState(mBlanker,
                 createScreenStateAnimator(mScreenOffAnimation), mDisplayId, displayState);
+        try {
+            com.android.server.display.util.OplusDisplayState.getInstance().setScreenState(
+                    mDisplayId == Display.DEFAULT_DISPLAY, mPowerState.getScreenState());
+        } catch (Throwable t) {
+            Slog.e(mTag, "Failed to set initial screen state in OplusDisplayState", t);
+        }
 
         if (mColorFadeEnabled) {
             mColorFadeOffAnimator = ObjectAnimator.ofFloat(
@@ -1243,10 +1263,23 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
     }
 
     private void setUpAutoBrightness(Context context, Handler handler) {
-        OplusBrightnessAmbientAdapter.getInstance().init(context, handler, this);
-        com.android.server.display.util.OplusDisplayState.getInstance().setLogicalDisplayId(mDisplayId == Display.DEFAULT_DISPLAY, mDisplayId);
-        com.android.server.display.util.OplusDisplayState.getInstance().setPhysicalDisplayId(mDisplayId == Display.DEFAULT_DISPLAY, mPhysicalDisplayId);
-        com.android.server.display.util.OplusDisplayState.getInstance().setScreenState(mDisplayId == Display.DEFAULT_DISPLAY, mPowerState.getScreenState());
+        try {
+            OplusBrightnessAmbientAdapter.getInstance().init(context, handler, this);
+            com.android.server.display.util.OplusDisplayState.getInstance().setLogicalDisplayId(mDisplayId == Display.DEFAULT_DISPLAY, mDisplayId);
+            long physicalDisplayId = mDisplayId;
+            if (mDisplayDevice != null) {
+                DisplayDeviceInfo displayDeviceInfo = mDisplayDevice.getDisplayDeviceInfoLocked();
+                if (displayDeviceInfo != null && displayDeviceInfo.address instanceof android.view.DisplayAddress.Physical) {
+                    physicalDisplayId = ((android.view.DisplayAddress.Physical) displayDeviceInfo.address).getPhysicalDisplayId();
+                }
+            }
+            com.android.server.display.util.OplusDisplayState.getInstance().setPhysicalDisplayId(mDisplayId == Display.DEFAULT_DISPLAY, physicalDisplayId);
+            if (mPowerState != null) {
+                com.android.server.display.util.OplusDisplayState.getInstance().setScreenState(mDisplayId == Display.DEFAULT_DISPLAY, mPowerState.getScreenState());
+            }
+        } catch (Throwable t) {
+            Slog.e(mTag, "Failed to initialize ColorOS display bootstrap in setUpAutoBrightness", t);
+        }
         mUseSoftwareAutoBrightnessConfig = mDisplayDeviceConfig.isAutoBrightnessAvailable();
 
         if (!mUseSoftwareAutoBrightnessConfig) {
@@ -1597,6 +1630,10 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
             }
         }
 
+        if (mDisplayBrightnessController != null) {
+            mDisplayBrightnessController.setBrightnessModel(getDisplayBrightnessModel());
+        }
+
         // Use doze brightness if one of following is true:
         // 1. The target `state` isDozeState.
         // 2. Doze power request(POLICY_DOZE) if there's no exception(useNormalBrightnessForDoze).
@@ -1894,6 +1931,8 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
             // use instead. We still preserve the calculated brightness for Standard Dynamic Range
             // (SDR) layers, but the main brightness value will be the one for HDR.
             float sdrAnimateValue = animateValue;
+            final float currentBrightness = mPowerState.getScreenBrightness();
+            final float currentSdrBrightness = mPowerState.getSdrScreenBrightness();
 
             if (clampedState.getHdrBrightness() != DisplayBrightnessState.BRIGHTNESS_NOT_SET) {
                 // TODO(b/343792639): The decision to prevent HBM for HDR in low power mode will be
@@ -1913,25 +1952,135 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
                 mBrightnessReasonTemp.addModifier(BrightnessReason.MODIFIER_HDR);
             }
 
+            IDisplayBrightnessModelExt oplusModel = getDisplayBrightnessModel();
+            com.android.server.display.feature.postprocess.OplusBrightnessPostProcessingManager postManager = getPostProcessingManager();
+            boolean isHdr = (clampedState.getHdrBrightness() != DisplayBrightnessState.BRIGHTNESS_NOT_SET)
+                    || (mBrightnessRangeController.getHighBrightnessMode() == BrightnessInfo.HIGH_BRIGHTNESS_MODE_HDR);
+            boolean isLowPower = (mBrightnessReasonTemp.getModifier() & BrightnessReason.MODIFIER_LOW_POWER) != 0
+                    || (mBrightnessReasonTemp.getModifier() & BrightnessReason.MODIFIER_DIMMED) != 0
+                    || mPowerRequest.lowPowerMode;
+
+            float customSdrAnimationRate = DisplayBrightnessState.CUSTOM_ANIMATION_RATE_NOT_SET;
+
+            if (oplusModel != null && postManager != null) {
+                int initialRate = slowChange
+                        ? oplusModel.getBrightnessRampRateSlow()
+                        : oplusModel.getBrightnessRampRateFast();
+                if (initialRate <= 0) initialRate = 40;
+
+                float sdrBacklight = sdrAnimateValue * oplusModel.getMaxBrightness();
+                float sdrNit = oplusModel.getValueByCurve(com.android.server.display.util.OplusBrightnessConstants.BACKLIGHT_SPLINE, sdrBacklight);
+                if (Float.isNaN(sdrNit) || sdrNit <= 0.0f) {
+                    sdrNit = sdrAnimateValue * oplusModel.getNormalMaxNit();
+                }
+
+                float desiredHdrRatio = 1.0f;
+                if (isHdr && clampedState.getHdrBrightness() != DisplayBrightnessState.BRIGHTNESS_NOT_SET && sdrAnimateValue > 0.0f) {
+                    desiredHdrRatio = clampedState.getHdrBrightness() / sdrAnimateValue;
+                }
+
+                boolean isGame = (mAutomaticBrightnessController != null
+                        && mAutomaticBrightnessController.getForegroundAppCategory() == android.content.pm.ApplicationInfo.CATEGORY_GAME);
+                int edrType = isGame
+                        ? com.android.server.display.util.OplusBrightnessConstants.EDR_TYPE_GAME
+                        : com.android.server.display.util.OplusBrightnessConstants.EDR_TYPE_HDR_VISION;
+                int gameFactor = (desiredHdrRatio >= 2.6f) ? 27 : 25;
+
+                boolean activeHdr = isHdr && (desiredHdrRatio > 1.05f
+                        || clampedState.getHdrBrightness() != DisplayBrightnessState.BRIGHTNESS_NOT_SET);
+                if (activeHdr && !isLowPower && !mIsInTransition) {
+                    postManager.setHdrInfo(true, desiredHdrRatio, edrType, gameFactor);
+                } else {
+                    postManager.setHdrInfo(false, 1.0f,
+                            com.android.server.display.util.OplusBrightnessConstants.EDR_TYPE_NORMAL, 0);
+                }
+
+                com.android.server.display.feature.postprocess.OplusDisplayBrightnessState.Builder postBuilder =
+                        new com.android.server.display.feature.postprocess.OplusDisplayBrightnessState.Builder();
+                postBuilder.setNit(sdrNit)
+                           .setDpcNit(sdrNit)
+                           .setSdrNit(sdrNit)
+                           .setDisplayId(mDisplayId)
+                           .setIsAutoBrightness(mAutomaticBrightnessStrategy.isAutoBrightnessEnabled())
+                           .setDragging(mAutomaticBrightnessController != null ? mAutomaticBrightnessController.isDragging()
+                                   : OplusBrightnessAmbientAdapter.getInstance().isDragging())
+                           .setLastRateType(mOplusRateType)
+                           .setPowerReq(mPowerRequest);
+
+                com.android.server.display.feature.postprocess.OplusDisplayBrightnessState postState =
+                        postManager.postProcessing(postBuilder, initialRate, currentBrightness, currentSdrBrightness);
+
+                float maxBrightness = oplusModel.getMaxBrightness();
+                if (maxBrightness > 0.0f) {
+                    animateValue = MathUtils.constrain(postState.getBrightness() / maxBrightness, 0.0f, 1.0f);
+                    sdrAnimateValue = MathUtils.constrain(postState.getSdrBrightness() / maxBrightness, 0.0f, 1.0f);
+                }
+                if (clampedState.getHdrBrightness() != DisplayBrightnessState.BRIGHTNESS_NOT_SET) {
+                    animateValue = Math.max(animateValue, clampedState.getHdrBrightness());
+                    hdrBrightness = animateValue;
+                    if (clampedState.getBrightness() > 0.0f) {
+                        sdrAnimateValue = clampedState.getBrightness();
+                    }
+                } else if (postState.isEdrSence()) {
+                    hdrBrightness = animateValue;
+                    mBrightnessReasonTemp.addModifier(BrightnessReason.MODIFIER_HDR);
+                }
+
+                mOplusCurrentNit = postState.getNit();
+                mOplusRateType = postState.getRateType();
+                mOplusRate = postState.getRate();
+
+                if (postState.isEdrSence() || mOplusRateType == com.android.server.display.util.OplusBrightnessConstants.BRIGHTNESS_RATE_TYPE_EDR_EXIT) {
+                    if (mOplusRate > 0 && maxBrightness > 0.0f) {
+                        customAnimationRate = (float) mOplusRate / maxBrightness;
+                    }
+                    if (postState.getSdrRate() > 0 && maxBrightness > 0.0f) {
+                        customSdrAnimationRate = (float) postState.getSdrRate() / maxBrightness;
+                    }
+                }
+
+                if (customAnimationRate > 0) {
+                    if (customSdrAnimationRate <= 0.0f || Float.isNaN(customSdrAnimationRate)) {
+                        customSdrAnimationRate = customAnimationRate;
+                    } else {
+                        float deltaHdr = Math.abs(animateValue - currentBrightness);
+                        float deltaSdr = Math.abs(sdrAnimateValue - currentSdrBrightness);
+                        if (deltaHdr > 1e-4f && deltaSdr > 1e-4f) {
+                            customSdrAnimationRate = customAnimationRate * (deltaSdr / deltaHdr);
+                        } else {
+                            customSdrAnimationRate = customAnimationRate;
+                        }
+                    }
+                }
+            }
+
+            // If not in HDR and not exiting EDR, strictly synchronize SDR target with panel target
+            if (!isHdr && mOplusRateType != com.android.server.display.util.OplusBrightnessConstants.BRIGHTNESS_RATE_TYPE_EDR_EXIT) {
+                sdrAnimateValue = animateValue;
+            }
+
             // If doze or suspend state is requested, finish brightness animation fast
             // to allow state animation to start.
             final boolean isDozeOrSuspend = Display.isDozeState(state)
                     || mPowerRequest.policy == POLICY_DOZE;
             if (isDozeOrSuspend) {
                 customAnimationRate = DisplayBrightnessState.CUSTOM_ANIMATION_RATE_NOT_SET;
+                customSdrAnimationRate = DisplayBrightnessState.CUSTOM_ANIMATION_RATE_NOT_SET;
                 slowChange = false;
+                sdrAnimateValue = animateValue;
             }
 
-            // Ensure fallback doze brightness never drops below calibrated doze floor when no
-            // explicit ambient doze brightness override is active.
+            // Stock ColorOS screenUpdateExt: Full-screen AOD preserves current brightness across transitions
             if (isDozeOrSuspend
                     && !BrightnessUtils.isValidBrightnessValue(mPowerRequest.dozeScreenBrightness)) {
-                brightnessState = Math.max(brightnessState, mScreenBrightnessDozeConfig);
-                animateValue = Math.max(animateValue, mScreenBrightnessDozeConfig);
-                sdrAnimateValue = Math.max(sdrAnimateValue, mScreenBrightnessDozeConfig);
+                boolean isFullScreenAod = Settings.Secure.getIntForUser(
+                        mContext.getContentResolver(), "full_screen_aod", 0, -2) == 1;
+                if (isFullScreenAod && BrightnessUtils.isValidBrightnessValue(currentBrightness)) {
+                    brightnessState = currentBrightness;
+                    animateValue = currentBrightness;
+                    sdrAnimateValue = currentBrightness;
+                }
             }
-            final float currentBrightness = mPowerState.getScreenBrightness();
-            final float currentSdrBrightness = mPowerState.getSdrScreenBrightness();
 
             if (BrightnessUtils.isValidBrightnessValue(animateValue)
                     && (animateValue != currentBrightness
@@ -1961,7 +2110,7 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
                             SCREEN_ANIMATION_RATE_MINIMUM);
                 } else if (customAnimationRate > 0) {
                     animateScreenBrightness(animateValue, sdrAnimateValue,
-                            customAnimationRate, /* ignoreAnimationLimits = */true);
+                            customAnimationRate, customSdrAnimationRate, /* ignoreAnimationLimits = */true);
                 } else {
                     boolean isIncreasing = animateValue > currentBrightness;
                     final boolean idle = mAutomaticBrightnessController != null
@@ -1978,7 +2127,16 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
                         rampSpeed = mBrightnessRampRateFastDecrease;
                     }
                     setAnimatorRampSpeeds(idle);
-                    animateScreenBrightness(animateValue, sdrAnimateValue, rampSpeed);
+                    float sdrRampSpeed = rampSpeed;
+                    if (isHdr || mOplusRateType == com.android.server.display.util.OplusBrightnessConstants.BRIGHTNESS_RATE_TYPE_EDR_EXIT) {
+                        float deltaPanel = Math.abs(animateValue - currentBrightness);
+                        float deltaSdr = Math.abs(sdrAnimateValue - currentSdrBrightness);
+                        if (deltaPanel > 1e-4f && deltaSdr > 1e-4f) {
+                            sdrRampSpeed = rampSpeed * (deltaSdr / deltaPanel);
+                        }
+                        sdrRampSpeed = Math.max(mBrightnessRampRateSlowDecrease, Math.min(mBrightnessRampRateFastIncrease, sdrRampSpeed));
+                    }
+                    animateScreenBrightness(animateValue, sdrAnimateValue, rampSpeed, sdrRampSpeed, false);
                 }
                 if (mAutomaticBrightnessController != null) {
                     mAutomaticBrightnessController.setBrightnessAnimating(
@@ -2541,16 +2699,21 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
     }
 
     private void animateScreenBrightness(float target, float sdrTarget, float rate) {
-        animateScreenBrightness(target, sdrTarget, rate, /* ignoreAnimationLimits = */false);
+        animateScreenBrightness(target, sdrTarget, rate, rate, /* ignoreAnimationLimits = */false);
     }
 
     private void animateScreenBrightness(float target, float sdrTarget, float rate,
             boolean ignoreAnimationLimits) {
+        animateScreenBrightness(target, sdrTarget, rate, rate, ignoreAnimationLimits);
+    }
+
+    private void animateScreenBrightness(float target, float sdrTarget, float rate, float sdrRate,
+            boolean ignoreAnimationLimits) {
         if (DEBUG) {
             Slog.d(mTag, "Animating brightness: target=" + target + ", sdrTarget=" + sdrTarget
-                    + ", rate=" + rate);
+                    + ", rate=" + rate + ", sdrRate=" + sdrRate);
         }
-        if (mScreenBrightnessRampAnimator.animateTo(target, sdrTarget, rate,
+        if (mScreenBrightnessRampAnimator.animateTo(target, sdrTarget, rate, sdrRate,
                 ignoreAnimationLimits)) {
             Trace.traceCounter(Trace.TRACE_TAG_POWER, "TargetScreenBrightness", (int) target);
             final boolean isFastAnimating = (rate == mBrightnessRampRateFastIncrease
@@ -3391,6 +3554,11 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
                             mAutomaticBrightnessController.setScreenBrightnessByUser(tempBrightness);
                         } else {
                             float dragLux = 0.0f;
+                            com.android.server.display.feature.ambience.utils.OplusLuxResult luxRes =
+                                    com.android.server.display.feature.ambience.OplusBrightnessAmbientAdapter.getInstance().getLuxResult();
+                            if (luxRes != null && !Float.isNaN(luxRes.getFinalLux()) && luxRes.getFinalLux() >= 0.0f) {
+                                dragLux = luxRes.getFinalLux();
+                            }
                             float dragNit = 0.0f;
                             IDisplayBrightnessModelExt model = getDisplayBrightnessModel();
                             if (model != null && model.getMaxBrightness() > 0.0f) {
@@ -3399,7 +3567,13 @@ public final class DisplayPowerController implements AutomaticBrightnessControll
                             } else if (mDisplayBrightnessController != null) {
                                 dragNit = mDisplayBrightnessController.convertToNits(tempBrightness);
                             }
-                            float defaultSplineNit = (model != null) ? model.getValueByCurve("default", dragLux) : dragNit;
+                            float defaultSplineNit = Float.NaN;
+                            if (model != null) {
+                                defaultSplineNit = model.getValueByCurve("default", dragLux);
+                            }
+                            if (Float.isNaN(defaultSplineNit) || defaultSplineNit <= 0.0f) {
+                                defaultSplineNit = dragNit;
+                            }
                             OplusBrightnessAmbientAdapter.getInstance().notifyDragInfo(
                                     dragLux, dragNit, defaultSplineNit, dragNit);
                         }

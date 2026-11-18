@@ -418,4 +418,15 @@ public class OplusBrightnessUtils {
             return defaultValue;
         }
     }
+
+    public static int parseIntSafe(String value, int defaultValue) {
+        if (value == null || value.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
 }

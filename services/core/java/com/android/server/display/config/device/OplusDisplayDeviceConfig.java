@@ -176,6 +176,12 @@ public class OplusDisplayDeviceConfig {
         xmlParserHelper5.init(parser);
         OplusDisplayXmlParserHelper xmlParserHelper6 = new OplusDisplayXmlParserHelper("/data/system/".concat(fileNameSinglePulse), resolveCandidateFile(fileNameSinglePulse));
         xmlParserHelper6.init(parser);
+        String appListPath = resolveCandidateFile("display_brightness_app_list.xml");
+        File appListFile = new File(appListPath);
+        if (appListFile.exists()) {
+            OplusDisplayXmlParserHelper xmlParserHelperAppList = new OplusDisplayXmlParserHelper("/data/system/display_brightness_app_list.xml", appListPath);
+            xmlParserHelperAppList.init(parser);
+        }
         this.mLowVoltageConfig.loadConfig(this.mManufacture);
         this.mDMRConfig.loadConfig(isFirstDisplay);
         this.mCurveConfig.ensureDefaultCalibration();

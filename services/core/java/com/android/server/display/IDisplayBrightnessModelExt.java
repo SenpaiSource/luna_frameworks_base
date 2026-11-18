@@ -103,6 +103,10 @@ public interface IDisplayBrightnessModelExt {
         return 0;
     }
 
+    default float calculateEnhanceNit(float currentNit, int factor) {
+        return currentNit;
+    }
+
     default float getBacklightFromBrightness(float brightness) {
         return 0.0f;
     }
