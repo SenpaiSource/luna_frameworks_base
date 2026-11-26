@@ -6670,14 +6670,23 @@ public final class ViewRootImpl implements ViewParent,
         }
 
         boolean isHdr = colorMode == ActivityInfo.COLOR_MODE_HDR
-                || colorMode == ActivityInfo.COLOR_MODE_HDR10;
-        if (isHdr && !mDisplay.isHdrSdrRatioAvailable()) {
+                || colorMode == ActivityInfo.COLOR_MODE_HDR10
+                || (desiredRatio > 1.0f && mDisplay != null && mDisplay.isHdrSdrRatioAvailable());
+        if (isHdr && (mDisplay == null || !mDisplay.isHdrSdrRatioAvailable())) {
             colorMode = ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT;
             isHdr = false;
+        } else if (isHdr && colorMode != ActivityInfo.COLOR_MODE_HDR10) {
+            colorMode = ActivityInfo.COLOR_MODE_HDR;
         }
         // TODO: Centralize this sanitization? Why do we let setting bad modes?
         // Alternatively, can we just let HWUI figure it out? Do we need to care here?
-        if (colorMode != ActivityInfo.COLOR_MODE_A8
+        // Note: When isHdr is true, preserve COLOR_MODE_HDR so setColorMode() is called
+        // with an HDR mode and returns the actual device headroom (not 1.0f). Without
+        // this guard, the sanitization resets colorMode to DEFAULT on displays where
+        // isScreenWideColorGamut() == false, causing setColorMode(DEFAULT) to return
+        // automaticRatio=1.0f, which clamps desiredRatio to 1.0 and prevents HBM
+        // brightness boost for Ultra HDR photos.
+        if (!isHdr && colorMode != ActivityInfo.COLOR_MODE_A8
                 && !getConfiguration().isScreenWideColorGamut()) {
             colorMode = ActivityInfo.COLOR_MODE_DEFAULT;
         }

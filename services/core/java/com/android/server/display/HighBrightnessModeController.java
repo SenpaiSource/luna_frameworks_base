@@ -201,8 +201,26 @@ class HighBrightnessModeController {
             // in this class
             float hdrBrightness = mHdrBrightnessCfg.getHdrBrightnessFromSdr(
                     mBrightness, mMaxDesiredHdrSdrRatio, /* ratioScaleFactor= */ 1);
+            if (mHbmData != null && mBrightnessMax > mHbmData.transitionPoint
+                    && mMaxDesiredHdrSdrRatio > 1.0f) {
+                final float transitionPoint = mHbmData.transitionPoint;
+                final float sdrProgress = MathUtils.constrain(
+                        mBrightness / transitionPoint, 0.0f, 1.0f);
+                final float maxHeadroom = (mHbmData.sdrToHdrRatioSpline != null) ? 8.0f : 5.0f;
+                final float headroomProgress = MathUtils.constrain(
+                        (mMaxDesiredHdrSdrRatio - 1.0f) / (maxHeadroom - 1.0f), 0.0f, 1.0f);
+                final float boostFactor = Math.max(sdrProgress,
+                        0.5f * headroomProgress + 0.5f * sdrProgress);
+                final float hbmBoost = MathUtils.lerp(transitionPoint, mBrightnessMax, boostFactor);
+                if (!BrightnessSynchronizer.floatEquals(hdrBrightness,
+                        PowerManager.BRIGHTNESS_INVALID_FLOAT)) {
+                    hdrBrightness = Math.max(hdrBrightness, hbmBoost);
+                } else {
+                    hdrBrightness = hbmBoost;
+                }
+            }
             if (hdrBrightness != PowerManager.BRIGHTNESS_INVALID) {
-                return hdrBrightness;
+                return Math.min(hdrBrightness, mBrightnessMax);
             }
         }
 

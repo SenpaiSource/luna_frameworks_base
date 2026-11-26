@@ -47,7 +47,7 @@ public class DozeBrightnessStrategy implements DisplayBrightnessStrategy {
 
     // The DisplayId of the associated logical display
     private final int mDisplayId;
-
+    private float mLastDozeBrightness = Float.NaN;
     public DozeBrightnessStrategy(DisplayManagerFlags flags, Context context, int displayId,
             float defaultDozeBrightness) {
         this(/* injector= */ null, flags, context, displayId, defaultDozeBrightness);
@@ -72,12 +72,15 @@ public class DozeBrightnessStrategy implements DisplayBrightnessStrategy {
         float dozeScreenBrightness =
                 strategyExecutionRequest.getDisplayPowerRequest().dozeScreenBrightness;
         if (BrightnessUtils.isValidBrightnessValue(dozeScreenBrightness)) {
+            final boolean slowChange = BrightnessUtils.isValidBrightnessValue(mLastDozeBrightness)
+                    && Math.abs(dozeScreenBrightness - mLastDozeBrightness) > 1e-4f;
+            mLastDozeBrightness = dozeScreenBrightness;
             return BrightnessUtils.constructDisplayBrightnessState(
                     BrightnessReason.REASON_DOZE,
                     dozeScreenBrightness,
-                    getName(), /* slowChange= */ false);
+                    getName(), slowChange);
         }
-
+        mLastDozeBrightness = Float.NaN;
         if (mFlags.isDisplayOffloadEnabled()
                 && strategyExecutionRequest.getOffloadSession() != null) {
             BrightnessEvent brightnessEvent = mInjector.getBrightnessEvent(mDisplayId);

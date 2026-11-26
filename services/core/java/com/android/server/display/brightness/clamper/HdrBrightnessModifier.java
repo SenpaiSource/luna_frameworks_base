@@ -30,6 +30,7 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.UserHandle;
 import android.provider.Settings;
+import android.util.MathUtils;
 import android.view.SurfaceControlHdrLayerInfoListener;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -164,6 +165,38 @@ public class HdrBrightnessModifier implements BrightnessStateModifier,
                     stateBuilder.getBrightness(), mMaxDesiredHdrRatio, getRatioScaleFactor(),
                     mHdrBrightnessData.sdrToHdrRatioSpline);
             float maxBrightness = getMaxBrightness(mMode, mMaxBrightness, mHdrBrightnessData);
+
+            // When in HBM_HDR mode and the desired headroom is > 1.0, the spline-based
+            // hdrBrightness is typically far below the HBM transition point (e.g. 0.35 vs 0.84)
+            // because the spline maps SDR nits to HDR nits without regard for the hardware HBM
+            // threshold. For HDR photos/Ultra HDR to physically boost the OLED panel into High
+            // Brightness Mode (triggering the DRM hbm_en signal), we need hdrBrightness to exceed
+            // hbmTransitionPoint. Scale it into [hbmTransitionPoint, maxBrightness] proportional
+            // to both the SDR brightness level and the requested headroom ratio.
+            if (mMode == Mode.HBM_HDR && mMaxDesiredHdrRatio > 1.0f
+                    && maxBrightness > mHdrBrightnessData.hbmTransitionPoint) {
+                final float transitionPoint = mHdrBrightnessData.hbmTransitionPoint;
+                final float sdrBrightness = stateBuilder.getBrightness();
+                // How far along into the SDR range we are (0 = min, 1 = at transition point)
+                final float sdrProgress = MathUtils.constrain(
+                        sdrBrightness / transitionPoint, 0.0f, 1.0f);
+                // How much headroom the content is requesting relative to device max
+                final float maxHeadroom = (mHdrBrightnessData.highestHdrSdrRatio > 1.0f)
+                        ? mHdrBrightnessData.highestHdrSdrRatio : 5.0f;
+                final float headroomProgress = MathUtils.constrain(
+                        (mMaxDesiredHdrRatio - 1.0f) / (maxHeadroom - 1.0f), 0.0f, 1.0f);
+                // Blend SDR position and headroom request to determine how deep into HBM to go
+                final float boostFactor = Math.max(sdrProgress,
+                        0.5f * headroomProgress + 0.5f * sdrProgress);
+                final float hbmBoost = MathUtils.lerp(transitionPoint, maxBrightness, boostFactor);
+                if (!BrightnessSynchronizer.floatEquals(hdrBrightness,
+                        PowerManager.BRIGHTNESS_INVALID_FLOAT)) {
+                    hdrBrightness = Math.max(hdrBrightness, hbmBoost);
+                } else {
+                    hdrBrightness = hbmBoost;
+                }
+            }
+
             hdrBrightness = Math.min(hdrBrightness, maxBrightness);
 
             stateBuilder.setHdrBrightness(hdrBrightness);

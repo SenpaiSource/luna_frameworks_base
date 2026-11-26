@@ -1218,6 +1218,10 @@ public class DisplayDeviceConfig {
         return mHbmData != null && mHbmData.sdrToHdrRatioSpline != null;
     }
 
+    public Spline getSdrToHdrRatioSpline() {
+        return mHbmData != null ? mHbmData.sdrToHdrRatioSpline : null;
+    }
+
     /**
      * Calculate the HDR brightness for the specified SDR brightenss, restricted by the
      * maxDesiredHdrSdrRatio (the ratio between the HDR luminance and SDR luminance)
